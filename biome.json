@@ -1,0 +1,18 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.6.7/schema.json",
+  "files": {
+    "includes": [
+      "tools/browser_smoke.mjs",
+      "web/*.js",
+      "web/*.css",
+      "web/index.html",
+      "package.json",
+      "biome.json"
+    ]
+  },
+  "formatter": { "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
+  "linter": { "enabled": true, "rules": { "preset": "recommended" } },
+  "assist": { "enabled": true },
+  "javascript": { "globals": ["createWarzone", "__PRECACHE_FILES__"] },
+  "html": { "formatter": { "enabled": true } }
+}

@@ -1,0 +1,36 @@
+[package]
+name = "warzone-app-client"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license-file = "LICENSE"
+description = "Unofficial Rust recreation of Playkot's Warzone for iOS."
+
+[dependencies]
+sdl2 = { version = "=0.38.0", default-features = false }
+serde = { version = "=1.0.228", features = ["derive", "rc"] }
+# Saves checksum the serialized State, including f64 camera coordinates. The
+# reader must recover the exact bits written by the serializer before hashing.
+serde_json = { version = "=1.0.149", features = ["float_roundtrip"] }
+png = "=0.18.1"
+rusttype = "=0.9.3"
+sha2 = "=0.10.9"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+codegen-units = 8
+lto = false
+# Retain per-module code generation between connected source batches. The
+# resource guard still serializes rustc and caps the complete process tree.
+incremental = true
+
+# Small WASM functions reduce the browser's optimizing-JIT memory peak. Native
+# release remains O3; the browser keeps LLVM's optimized loops with size-aware
+# inlining rather than copying large dialog/serialization bodies into callers.
+[profile.web]
+inherits = "release"
+opt-level = "s"
+codegen-units = 8
