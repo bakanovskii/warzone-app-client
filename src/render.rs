@@ -2487,6 +2487,21 @@ impl<'a> Art<'a> {
             }
             self.source_interface(canvas, &view)?;
         }
+        // Page artwork and localized labels are stable during a swipe. Prepare
+        // them once under the loader instead of decoding on the first gesture.
+        if let Some(width) = warzone_app_client::interface_leagues::page_width(scene, camera) {
+            for page in 0..5 {
+                let mut view = View::default();
+                warzone_app_client::interface_leagues::help(
+                    &mut view,
+                    scene,
+                    state,
+                    camera,
+                    page as f64 * width,
+                );
+                self.source_interface(canvas, &view)?;
+            }
+        }
         self.warm_ui.extend(self.textures.keys().cloned());
         canvas.set_clip_rect(None);
         Ok(())
@@ -2505,6 +2520,7 @@ impl<'a> Art<'a> {
     ) -> Result<(), String> {
         let size = canvas.output_size()?;
         if !self.cache_source_views
+            || view.scrolling
             || size.0 as u64 * size.1 as u64 * 4 > 32 * 1024 * 1024
             || view
                 .draws

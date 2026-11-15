@@ -1543,7 +1543,10 @@ fn run() -> Result<(), String> {
                             input.drag = None;
                             message = text;
                         }
-                        Err(text) => message = text,
+                        Err(text) => {
+                            ui.notice = Some(text.clone());
+                            message = text;
+                        }
                     }
                     continue;
                 }

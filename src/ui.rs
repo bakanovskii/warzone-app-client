@@ -77,6 +77,7 @@ pub struct Ui {
     scroll_maximum: f64,
     scroll_seconds: f64,
     scroll_velocity: f64,
+    scroll_page_target: Option<f64>,
     scroll_sample: Option<(std::time::Instant, f64)>,
     scroll_kind: Option<Kind>,
     scroll_drag: Option<(i32, f64)>,
@@ -315,6 +316,7 @@ impl Ui {
         self.scroll_seconds = self.animation_seconds;
         if self.scroll_kind != self.kind {
             self.scroll_velocity = 0.;
+            self.scroll_page_target = None;
             self.scroll_sample = None;
             self.scroll_kind = self.kind;
         }
@@ -328,7 +330,18 @@ impl Ui {
                     warzone_app_client::quest_navigation::Route::Building { .. }
                 )
         }) && matches!(self.kind, Some(Kind::Construction | Kind::Shop));
-        if self.scroll_drag.is_none() && !guided_shop {
+        if self.kind == Some(Kind::LeaguesHelp) {
+            if self.scroll_drag.is_none() {
+                if let Some(target) = self.scroll_page_target {
+                    self.scroll =
+                        target + (self.scroll - target) * (-16. * elapsed.clamp(0., 0.1)).exp();
+                    if (self.scroll - target).abs() < 0.1 * self.viewport_scale.max(1.) {
+                        self.scroll = target;
+                        self.scroll_page_target = None;
+                    }
+                }
+            }
+        } else if self.scroll_drag.is_none() && !guided_shop {
             self.scroll = warzone_app_client::scroll_motion::coast(
                 self.scroll,
                 &mut self.scroll_velocity,
@@ -936,12 +949,19 @@ impl Ui {
                     | Kind::Production
                     | Kind::Research
                     | Kind::Upgrades
+                    | Kind::Leagues
+                    | Kind::LeaguesHelp
             )
         ) {
             if let Some(d) = view.draws.first_mut() {
                 d.node.parents.push("source_pause_world".into());
             }
         }
+        view.scrolling = self.scroll_drag.is_some()
+            || self.scroll_page_target.is_some()
+            || self.scroll_velocity != 0.
+            || self.scroll < 0.
+            || self.scroll > self.scroll_maximum;
         self.guide_overlay(&mut view, scene, state, camera);
         if self.kind.is_none()
             && !self.editing
@@ -2232,7 +2252,16 @@ impl Ui {
                     } else {
                         50.
                     };
-                    self.scroll = (self.scroll - *y as f64 * distance).clamp(0., view.scroll_max);
+                    if self.kind == Some(Kind::LeaguesHelp) {
+                        self.scroll_page_target = Some(
+                            (self.scroll_page_target.unwrap_or(self.scroll) - *y as f64 * distance)
+                                .clamp(0., view.scroll_max),
+                        );
+                        self.scroll_velocity = 0.;
+                    } else {
+                        self.scroll =
+                            (self.scroll - *y as f64 * distance).clamp(0., view.scroll_max);
+                    }
                     return EventResult::Consumed;
                 }
                 Event::MouseButtonDown {
@@ -2291,6 +2320,7 @@ impl Ui {
                             self.scroll,
                         ));
                         self.scroll_velocity = 0.;
+                        self.scroll_page_target = None;
                         self.scroll_sample = Some((std::time::Instant::now(), self.scroll));
                     }
                     if self.kind == Some(Kind::Missions)
@@ -2391,7 +2421,9 @@ impl Ui {
                         if let Some(w) =
                             warzone_app_client::interface_leagues::page_width(scene, camera)
                         {
-                            self.scroll = (self.scroll / w).round().clamp(0., 4.) * w;
+                            self.scroll_page_target =
+                                Some((self.scroll / w).round().clamp(0., 4.) * w);
+                            self.scroll_velocity = 0.;
                         }
                     }
                     self.scroll_drag = None;
@@ -3738,6 +3770,65 @@ impl Ui {
 #[cfg(test)]
 mod pointer_view_checks {
     use super::*;
+    #[test]
+    fn league_swipe_settles_to_a_page_without_inertial_drift() {
+        let pack = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/pack");
+        let scene = Scene::load(&pack).unwrap();
+        let seed =
+            warzone_app_client::save::digest(&std::fs::read(pack.join("scene.json")).unwrap());
+        let state = State::seed(&scene, seed).unwrap();
+        let camera = Camera {
+            x: 0.,
+            y: 0.,
+            zoom: 1.,
+            width: 1920,
+            height: 1080,
+        };
+        let width = warzone_app_client::interface_leagues::page_width(&scene, &camera).unwrap();
+        let mut ui = Ui {
+            kind: Some(Kind::LeaguesHelp),
+            scroll_kind: Some(Kind::LeaguesHelp),
+            scroll: width * 0.72,
+            scroll_velocity: 1200.,
+            scroll_drag: Some((1000, 0.)),
+            ..Ui::default()
+        };
+        let before = ui.scroll;
+        ui.event(
+            &Event::MouseButtonUp {
+                timestamp: 0,
+                window_id: 1,
+                which: 0,
+                mouse_btn: MouseButton::Left,
+                clicks: 1,
+                x: 600,
+                y: 700,
+            },
+            &camera,
+            &scene,
+            &state,
+        );
+        assert_eq!(ui.scroll, before, "Release must not jump to the page");
+        assert_eq!(ui.scroll_page_target, Some(width));
+        ui.animation_seconds = 1. / 60.;
+        ui.update_time_ms(&scene, &state, 0);
+        assert!(ui.scroll > before && ui.scroll < width);
+        assert!(ui.original_view(&scene, &state, &camera).unwrap().scrolling);
+        for frame in 2..=120 {
+            ui.animation_seconds = frame as f64 / 60.;
+            ui.update_time_ms(&scene, &state, 0);
+        }
+        assert_eq!(ui.scroll, width);
+        assert_eq!(ui.scroll_velocity, 0.);
+        assert!(!ui.original_view(&scene, &state, &camera).unwrap().scrolling);
+        assert!(
+            ui.original_view(&scene, &state, &camera)
+                .unwrap()
+                .draws
+                .iter()
+                .any(|d| d.node.parents.iter().any(|p| p == "source_pause_world"))
+        );
+    }
     #[test]
     fn lazy_marker_hits_preserve_the_drawn_hud_and_map_action_order() {
         let pack = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/pack");

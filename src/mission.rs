@@ -317,6 +317,14 @@ impl State {
             } else {
                 self.mission_roster(scene)
             };
+            if roster.is_empty() {
+                return Err(crate::interface::lang(
+                    scene,
+                    "#nothing_soldiers",
+                    "У тебя нет армии! Отправляйся на базу и начни тренировку войск.",
+                )
+                .into());
+            }
             if roster.len() < m.min_descent {
                 return Err(format!("Нужно отрядов: {}", m.min_descent));
             }

@@ -55,102 +55,6 @@ pub fn build(
     };
     let s = crate::hud::scale(camera);
     reset(v);
-    if briefing {
-        let Some(m) = combat.campaign().nth(selected) else {
-            return false;
-        };
-        let root = &c.symbols["campaign_briefing"];
-        let o = [
-            (camera.width as f64 / s - root.size[0]) * 0.5,
-            (camera.height as f64 / s - root.size[1]) * 0.5,
-        ];
-        let locked = state.mission_access(scene, &m.mission).is_err();
-        // Current original normal missions have no purchase rows. Source hides
-        // all empty resource/equipment areas, keeps the soldiers poster, and
-        // disables Start (hides access button) for an unmet predecessor.
-        v.add(
-            root,
-            o,
-            s,
-            |n| {
-                !(n.id == "needed_txt"
-                    && state
-                        .systems
-                        .as_ref()
-                        .is_some_and(|p| p.flag(&format!("MissionStarted-{}", m.mission_id))))
-                    && !n.parents.iter().any(|id| {
-                        matches!(
-                            id.as_str(),
-                            "play_money"
-                                | "oil"
-                                | "iron"
-                                | "button_access"
-                                | "equipmentrequired_txt"
-                                | "itemsArea1"
-                                | "itemsArea2"
-                                | "itemsArea3"
-                        )
-                    })
-                    && (locked
-                        || !matches!(
-                            n.id.as_str(),
-                            "completefirst_txt" | "completefirst_headertxt"
-                        ))
-            },
-            |n| {
-                Some(match n.id.as_str() {
-                    "caption_txt" => {
-                        interface::lang(scene, &format!("#item_{}_name", m.mission_id), &m.title)
-                            .into()
-                    }
-                    "description_txt" => {
-                        interface::lang(scene, &format!("#item_{}_DESCRIPTION", m.mission_id), "")
-                            .into()
-                    }
-                    "startmissionbtn_txt" | "play_txt" => {
-                        if state
-                            .systems
-                            .as_ref()
-                            .is_some_and(|p| p.flag(&format!("Mission-{}", m.mission_id)))
-                        {
-                            "Пройти снова".into()
-                        } else {
-                            interface::lang(scene, "#start_mission", "Начать миссию").into()
-                        }
-                    }
-                    "needed_txt" => interface::lang(scene, "#mission_required_1", &n.text).into(),
-                    "completefirst_headertxt" => {
-                        interface::lang(scene, "#complete_this_mission_first", "").into()
-                    }
-                    "completefirst_txt" => combat
-                        .campaign()
-                        .find(|p| p.mission_id == m.parent)
-                        .map(|p| {
-                            interface::lang(
-                                scene,
-                                &format!("#item_{}_name", p.mission_id),
-                                &p.title,
-                            )
-                            .to_owned()
-                        })
-                        .unwrap_or_default(),
-                    _ => String::new(),
-                })
-            },
-            None,
-        );
-        if !locked {
-            v.button(root, "button_play", o, s, Action::Primary);
-        } else {
-            for d in &mut v.draws {
-                if d.node.parents.iter().any(|p| p == "button_play") {
-                    d.grayscale = true;
-                }
-            }
-        }
-        v.button(root, "close_btn", o, s, Action::Close);
-        return true;
-    }
     let offset = clamp_offset(camera, offset);
     v.add(root, [-offset[0], -offset[1]], s, |_| true, |_| None, None);
     let next = state
@@ -269,5 +173,113 @@ pub fn build(
     let o = [camera.width as f64 / s, camera.height as f64 / s];
     v.add(menu, o, s, |_| true, |_| None, None);
     v.button(menu, "mainmenu_btn", o, s, Action::Close);
+    if briefing {
+        // The info dialog belongs to MissionsDialog. Keep the same campaign
+        // offset underneath it, but prevent taps from reaching its markers/menu.
+        v.hits.clear();
+        v.blocks.clear();
+        return build_briefing(v, scene, state, camera, selected);
+    }
+    true
+}
+
+fn build_briefing(
+    v: &mut View,
+    scene: &Scene,
+    state: &State,
+    camera: &Camera,
+    selected: usize,
+) -> bool {
+    let c = scene.interface.as_ref().unwrap();
+    let combat = scene.combat.as_ref().unwrap();
+    let s = crate::hud::scale(camera);
+    let Some(m) = combat.campaign().nth(selected) else {
+        return false;
+    };
+    let root = &c.symbols["campaign_briefing"];
+    let o = [
+        (camera.width as f64 / s - root.size[0]) * 0.5,
+        (camera.height as f64 / s - root.size[1]) * 0.5,
+    ];
+    let locked = state.mission_access(scene, &m.mission).is_err();
+    // Current original normal missions have no purchase rows. Source hides
+    // all empty resource/equipment areas, keeps the soldiers poster, and
+    // disables Start (hides access button) for an unmet predecessor.
+    v.add(
+        root,
+        o,
+        s,
+        |n| {
+            !(n.id == "needed_txt"
+                && state
+                    .systems
+                    .as_ref()
+                    .is_some_and(|p| p.flag(&format!("MissionStarted-{}", m.mission_id))))
+                && !n.parents.iter().any(|id| {
+                    matches!(
+                        id.as_str(),
+                        "play_money"
+                            | "oil"
+                            | "iron"
+                            | "button_access"
+                            | "equipmentrequired_txt"
+                            | "itemsArea1"
+                            | "itemsArea2"
+                            | "itemsArea3"
+                    )
+                })
+                && (locked
+                    || !matches!(
+                        n.id.as_str(),
+                        "completefirst_txt" | "completefirst_headertxt"
+                    ))
+        },
+        |n| {
+            Some(match n.id.as_str() {
+                "caption_txt" => {
+                    interface::lang(scene, &format!("#item_{}_name", m.mission_id), &m.title).into()
+                }
+                "description_txt" => {
+                    interface::lang(scene, &format!("#item_{}_DESCRIPTION", m.mission_id), "")
+                        .into()
+                }
+                "startmissionbtn_txt" | "play_txt" => {
+                    if state
+                        .systems
+                        .as_ref()
+                        .is_some_and(|p| p.flag(&format!("Mission-{}", m.mission_id)))
+                    {
+                        "Пройти снова".into()
+                    } else {
+                        interface::lang(scene, "#start_mission", "Начать миссию").into()
+                    }
+                }
+                "needed_txt" => interface::lang(scene, "#mission_required_1", &n.text).into(),
+                "completefirst_headertxt" => {
+                    interface::lang(scene, "#complete_this_mission_first", "").into()
+                }
+                "completefirst_txt" => combat
+                    .campaign()
+                    .find(|p| p.mission_id == m.parent)
+                    .map(|p| {
+                        interface::lang(scene, &format!("#item_{}_name", p.mission_id), &p.title)
+                            .to_owned()
+                    })
+                    .unwrap_or_default(),
+                _ => String::new(),
+            })
+        },
+        None,
+    );
+    if !locked {
+        v.button(root, "button_play", o, s, Action::Primary);
+    } else {
+        for d in &mut v.draws {
+            if d.node.parents.iter().any(|p| p == "button_play") {
+                d.grayscale = true;
+            }
+        }
+    }
+    v.button(root, "close_btn", o, s, Action::Close);
     true
 }

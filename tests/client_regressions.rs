@@ -124,6 +124,76 @@ fn animation_frames_are_shared_by_entity_clones() {
 }
 
 #[test]
+fn mission_briefing_retains_the_campaign_map_and_its_offset() {
+    use warzone_app_client::{interface::Action, interface_campaign};
+    let (scene, state, _) = fixture();
+    for (width, height) in [(960, 640), (1920, 1080)] {
+        let camera = Camera {
+            x: 0.,
+            y: 0.,
+            zoom: 1.,
+            width,
+            height,
+        };
+        let offset = [75., 210.];
+        let mut map = View::default();
+        let mut briefing = View::default();
+        assert!(interface_campaign::build(
+            &mut map, &scene, &state, &camera, 0, false, offset, 1.25,
+        ));
+        assert!(interface_campaign::build(
+            &mut briefing,
+            &scene,
+            &state,
+            &camera,
+            0,
+            true,
+            offset,
+            1.25,
+        ));
+        assert!(briefing.draws.len() > map.draws.len());
+        assert_eq!(
+            serde_json::to_value(&briefing.draws[..map.draws.len()]).unwrap(),
+            serde_json::to_value(&map.draws).unwrap(),
+        );
+        assert!(
+            briefing
+                .hits
+                .iter()
+                .all(|hit| matches!(hit.action, Action::Close | Action::Primary))
+        );
+    }
+}
+
+#[test]
+fn starting_a_campaign_without_troops_returns_the_original_warning() {
+    use warzone_app_client::mission::Command;
+    let (scene, mut state, _) = fixture();
+    let combat = scene.combat.as_ref().unwrap();
+    for troop in state.mission_roster(&scene) {
+        state = state.demolish(&scene, &troop.uid, 1).unwrap().0;
+    }
+    let name = combat.campaign_names().next().unwrap().clone();
+    let parent = combat.missions[&name].parent;
+    state
+        .systems
+        .as_mut()
+        .unwrap()
+        .set(format!("Mission-{parent}"), 1);
+    state.validate(&scene).unwrap();
+    assert!(state.mission_roster(&scene).is_empty());
+    assert!(state.mission_access(&scene, &name).is_ok());
+    assert_eq!(
+        state
+            .mission_apply(&scene, &Command::Open(name), 1)
+            .err()
+            .unwrap(),
+        "У тебя нет армии! Отправляйся на базу и начни тренировку войск.",
+    );
+    assert!(state.mission.is_none());
+}
+
+#[test]
 fn wide_panels_cover_the_viewport_and_controls_follow_their_art() {
     use warzone_app_client::interface::{self, Action, Screen};
     let (scene, state, _) = fixture();
@@ -165,7 +235,7 @@ fn wide_panels_cover_the_viewport_and_controls_follow_their_art() {
                 Some(Action::Close)
             );
         }
-        for panel in ["achievements", "leagues", "pvp"] {
+        for panel in ["achievements", "leagues", "leagues_help", "pvp"] {
             let mut view = View::default();
             if panel == "achievements" {
                 warzone_app_client::interface_achievements::build(
@@ -174,6 +244,9 @@ fn wide_panels_cover_the_viewport_and_controls_follow_their_art() {
                 .unwrap();
             } else if panel == "leagues" {
                 warzone_app_client::interface_leagues::build(&mut view, &scene, &state, &camera, 0)
+                    .unwrap();
+            } else if panel == "leagues_help" {
+                warzone_app_client::interface_leagues::help(&mut view, &scene, &state, &camera, 0.)
                     .unwrap();
             } else {
                 warzone_app_client::interface_pvp::profile(&mut view, &scene, &state, &camera)

@@ -100,7 +100,8 @@ pub fn build(
     Some(())
 }
 pub fn clip(scene: &Scene, camera: &Camera) -> Option<[f64; 4]> {
-    let root = scene.interface.as_ref()?.symbols.get("leagues_help")?;
+    let responsive = help_panel(scene, camera)?;
+    let root = &responsive;
     let s = crate::hud::scale(camera);
     let r = root.frames.get("picture_frame")?;
     Some([
@@ -109,6 +110,24 @@ pub fn clip(scene: &Scene, camera: &Camera) -> Option<[f64; 4]> {
         r[2] * s,
         r[3] * s,
     ])
+}
+fn help_panel(scene: &Scene, camera: &Camera) -> Option<interface::Symbol> {
+    let source = scene.interface.as_ref()?.symbols.get("leagues_help")?;
+    let mut panel = interface::wide_panel(source, camera, &["close_btn"]);
+    let extra = panel.size[0] - source.size[0];
+    // Only the outer shade spans the window. The authored picture backing and
+    // pages stay centred at their original size, alongside their clipping frame.
+    for (node, original) in panel.nodes.iter_mut().zip(&source.nodes) {
+        if original.kind == "image"
+            && original.parents.is_empty()
+            && original.rect[2] >= 450.
+            && original.rect[2] < source.size[0] - 1.
+        {
+            node.rect = original.rect;
+            node.rect[0] += extra / 2.;
+        }
+    }
+    Some(panel)
 }
 pub fn page_width(scene: &Scene, camera: &Camera) -> Option<f64> {
     Some(
@@ -133,7 +152,8 @@ pub fn help(
     scroll: f64,
 ) -> Option<()> {
     let c = scene.interface.as_ref()?;
-    let root = c.symbols.get("leagues_help")?;
+    let responsive = help_panel(scene, camera)?;
+    let root = &responsive;
     let scale = crate::hud::scale(camera);
     let o = [
         (camera.width as f64 / scale - root.size[0]) / 2.,
@@ -170,6 +190,12 @@ pub fn help(
         None,
     );
     for i in 0..5 {
+        // A swipe needs only the page(s) intersecting this frame. Don't clone
+        // and serialize all five sheets on every pointer motion and frame.
+        let left = i as f64 * frame[2] * scale - scroll;
+        if left >= clip[2] || left + frame[2] * scale <= 0. {
+            continue;
+        }
         let row = c.symbols.get(&format!("leagues_help_img{}", i + 1))?;
         let pos = [
             o[0] + frame[0] + i as f64 * frame[2] + (frame[2] - row.size[0]) / 2. - scroll / scale,

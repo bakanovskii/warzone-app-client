@@ -260,6 +260,9 @@ pub struct Hit {
 }
 #[derive(Clone, Default)]
 pub struct View {
+    /// Moving scroll content draws directly; rebuilding a full-window render
+    /// target each frame forces synchronous WebGL framebuffer validation.
+    pub scrolling: bool,
     pub deployment_preview: Option<([[f64; 2]; 4], bool)>,
     /// Additional clear ellipses in the original UIViewWithHole overlay.
     pub extra_tutorial_holes: Vec<[f64; 4]>,

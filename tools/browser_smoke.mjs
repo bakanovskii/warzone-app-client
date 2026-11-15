@@ -98,7 +98,7 @@ const reload = async () => {
         `performance.timeOrigin!==${origin} && document.readyState==='complete' && typeof launch==='function'`,
       );
     } catch (error) {
-      if (String(error).includes("context") || String(error).includes("Context")) return false;
+      if (/context|Inspected target navigated or closed/i.test(String(error))) return false;
       throw error;
     }
   }, 30);
@@ -498,6 +498,68 @@ try {
       await screenshot(`wide-${name}`);
       const after = await evaluate("JSON.parse(JSON.stringify(WarzoneAudio.stats))");
       const newPlays = after.plays.slice(before.plays.length);
+      if (name === "leagues" && process.env.WARZONE_REVIEW113 === "1") {
+        const league = scene.interface.symbols.leagues;
+        await click(
+          point("leagues", "help_btn", [(568 - league.size[0]) / 2, h - league.size[1]], true),
+        );
+        await screenshot("wide-leagues-help");
+        const help = scene.interface.symbols.leagues_help,
+          frame = help.frames.picture_frame,
+          cy = (h - help.size[1] + frame[1] + frame[3] / 2) * scale,
+          distance = frame[2] * scale * 0.7;
+        const measurements = [];
+        if (process.env.WARZONE_CPU_PROFILE === "1") {
+          await rpc("Profiler.enable");
+          await rpc("Profiler.start");
+        }
+        for (const direction of [-1, 1, -1, 1]) {
+          const sx = 960 - (direction * distance) / 2;
+          await evaluate("game.warzoneFrameTimes.length=0");
+          await rpc("Input.dispatchMouseEvent", {
+            type: "mousePressed",
+            button: "left",
+            buttons: 1,
+            clickCount: 1,
+            x: sx,
+            y: cy,
+          });
+          for (let i = 1; i <= 20; i++) {
+            await rpc("Input.dispatchMouseEvent", {
+              type: "mouseMoved",
+              button: "left",
+              buttons: 1,
+              x: sx + (direction * distance * i) / 20,
+              y: cy,
+            });
+            await delay(16);
+          }
+          await rpc("Input.dispatchMouseEvent", {
+            type: "mouseReleased",
+            button: "left",
+            buttons: 0,
+            clickCount: 1,
+            x: sx + direction * distance,
+            y: cy,
+          });
+          await delay(500);
+          measurements.push(await evaluate("[...game.warzoneFrameTimes]"));
+        }
+        await writeFile(join(out, "league-help-scroll.json"), JSON.stringify(measurements));
+        if (process.env.WARZONE_CPU_PROFILE === "1") {
+          const { profile } = await rpc("Profiler.stop");
+          await writeFile(join(out, "league-help.cpuprofile"), JSON.stringify(profile));
+          await rpc("Profiler.disable");
+        }
+        for (const type of ["keyDown", "keyUp"])
+          await rpc("Input.dispatchKeyEvent", {
+            type,
+            key: "Escape",
+            code: "Escape",
+            windowsVirtualKeyCode: 27,
+          });
+        await delay(250);
+      }
       const buttonClicks = newPlays.filter(
         (p) => p.kind === 0 && Math.abs(p.duration - clickDuration) < 0.00001,
       ).length;
@@ -538,6 +600,46 @@ try {
       await click(close);
     }
     await writeFile(join(out, "wide-clicks.json"), JSON.stringify(clickCounts, null, 2));
+    if (process.env.WARZONE_REVIEW113 === "1") {
+      const key = async (name, code) => {
+        for (const type of ["keyDown", "keyUp"])
+          await rpc("Input.dispatchKeyEvent", {
+            type,
+            key: name,
+            code: name,
+            windowsVirtualKeyCode: code,
+          });
+        await delay(750);
+      };
+      await click(
+        point("main", "missions_btn", [w - scene.interface.symbols.main.size[0] - 5, h - 45]),
+      );
+      await screenshot("campaign-map");
+      await key("Enter", 13);
+      await screenshot("campaign-briefing");
+      if (process.env.WARZONE_NO_ARMY === "1") {
+        await click(
+          point("campaign_briefing", "button_play", [
+            (w - scene.interface.symbols.campaign_briefing.size[0]) / 2,
+            (h - scene.interface.symbols.campaign_briefing.size[1]) / 2,
+          ]),
+        );
+        await screenshot("campaign-no-army-warning");
+        if (
+          await evaluate(
+            "JSON.parse(game.FS.readFile('/saves/main/state.json',{encoding:'utf8'})).state.mission != null",
+          )
+        )
+          throw Error("An empty army was admitted into a mission");
+        const message = scene.interface.symbols.message,
+          ok = message.buttons.ok_btn;
+        await click([960, ((h - message.size[1]) / 2 + ok[1] + ok[3] / 2) * scale]);
+        await screenshot("campaign-warning-dismissed");
+      }
+      await key("Escape", 27);
+      await screenshot("campaign-map-returned");
+      await key("Escape", 27);
+    }
     await rpc("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 2 });
     const tap = async (point) => {
       await rpc("Input.dispatchTouchEvent", {
