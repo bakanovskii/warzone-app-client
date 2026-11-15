@@ -12,6 +12,8 @@ What changed compared to original IOS version:
 5. Free banknote offers were added to shop for tests
 6. Remove small bugs
 
+![Game preview](third_party/photos/cover.png)
+
 ## Сборка и запуск
 
 To compile you need original **Warzone 1.11.2 IPA**. Put it next to `Cargo.toml` using the `warzone.ipa` name. Checksums are included in `tools/assets.json`.
