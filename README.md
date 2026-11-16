@@ -44,6 +44,8 @@ Corrupted files are not removed automatically.
 Audio converts using FFmpeg. Executable iOS file and sign-file are not migrated.
 
 Geometry and local rules are stored in `tools/layout.json`.
+Complete ambient animation graphs are compiled from the IPA into `assets/pack/ambient.json`.
+Preparing an existing pack adds these timelines without changing its scene checksum or saved progress.
 Open-source backup fonts with license are stored `third_party/fonts/`.
 
 ## Browser version and PWA

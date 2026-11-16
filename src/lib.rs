@@ -1,6 +1,7 @@
 //! Standalone scene model. Dependencies are data/desktop libraries only.
 //! Reuse the already verified pure state rules without compiling ARM adapters.
 pub mod achievements;
+pub mod animation;
 pub mod bank;
 pub mod battle;
 pub mod battle_camera;
@@ -120,15 +121,20 @@ pub struct Track {
     pub texture: String,
     pub fps: f64,
     pub frames: std::sync::Arc<[Vec<Sprite>]>,
+    #[serde(skip)]
+    pub ambient: Option<std::sync::Arc<animation::Clip>>,
 }
 impl Track {
-    pub fn frame(&self, seconds: f64) -> &[Sprite] {
+    pub fn frame(&self, seconds: f64) -> animation::Frame<'_> {
+        if let Some(clip) = &self.ambient {
+            return animation::Frame::graph(clip, seconds);
+        }
         let frame = if self.fps > 0. {
             (seconds.max(0.) * self.fps).floor() as usize % self.frames.len()
         } else {
             0
         };
-        &self.frames[frame]
+        animation::Frame::Flat(self.frames[frame].iter().cloned())
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -242,6 +248,7 @@ impl Scene {
         }
         let mut scene: Self = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
         scene.validate()?;
+        animation::load(&mut scene, pack)?;
         scene
             .entities
             .sort_by(|a, b| world::depth_compare(a, b, &scene.projection));

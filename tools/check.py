@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 
 from prepare import ROOT, prepare
@@ -27,6 +28,10 @@ checks = [
     ("ruff-lint", ["ruff", "check", "."]),
     ("ruff-format", ["ruff", "format", "--check", "."]),
     ("web-lint-format", ["npm", "run", "check"]),
+    (
+        "animation-export",
+        [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tools", "-p", "test_*.py"],
+    ),
 ]
 if not args.scripts_only:
     prepare(ROOT / "warzone.ipa", ROOT / "assets/pack")

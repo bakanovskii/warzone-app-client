@@ -111,7 +111,22 @@ impl Scene {
         }
         raw["progression"]["language"] =
             serde_json::to_value(strings).map_err(|e| e.to_string())?;
-        *self = serde_json::from_value(raw).map_err(|e| e.to_string())?;
+        // Ambient clips are transient Arc references, deliberately absent from
+        // serialized scene/save data. Text localization must retain them too,
+        // including the initial language application at game startup.
+        let mut translated = serde_json::from_value(raw).map_err(|e| e.to_string())?;
+        let mut clips = Vec::new();
+        crate::animation::for_each_track(self, |t| clips.push(t.ambient.clone()));
+        let mut clips = clips.into_iter();
+        let mut missing = false;
+        crate::animation::for_each_track(&mut translated, |t| match clips.next() {
+            Some(clip) => t.ambient = clip,
+            None => missing = true,
+        });
+        if missing || clips.next().is_some() {
+            return Err("Localization changed animation track structure".into());
+        }
+        *self = translated;
         // Scene::load sorts instances by map position. Bind their names by
         // type identity, never by the original JSON's array indices.
         if let Some(world) = &self.world {

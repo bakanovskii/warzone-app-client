@@ -1719,7 +1719,11 @@ impl<'a> Art<'a> {
             } else {
                 &e.tracks
             };
-            let clock = pose.as_ref().map_or(seconds, |p| p.time);
+            let clock = if pose.as_ref().is_none_or(|p| p.pose == "idle") {
+                warzone_app_client::animation::idle_time(&e.uid, seconds)
+            } else {
+                pose.as_ref().unwrap().time
+            };
             let sale_red = !hud_state.tactical
                 && hud_state
                     .original
@@ -1800,7 +1804,7 @@ impl<'a> Art<'a> {
             )?;
             let p = scene.projection.project(e.x, e.y);
             for t in &e.tracks {
-                for s in t.frame(seconds) {
+                for s in t.frame(warzone_app_client::animation::idle_time(&e.uid, seconds)) {
                     if !matches!(e.kind.as_str(), "unit" | "units") {
                         self.ensure_texture(&t.texture)?;
                         self.textures.get_mut(&t.texture).unwrap().set_color_mod(

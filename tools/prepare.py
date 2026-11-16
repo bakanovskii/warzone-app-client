@@ -10,6 +10,8 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
+from animations import build as build_animations
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -26,11 +28,30 @@ def prepare(ipa, output):
     output.parent.mkdir(parents=True, exist_ok=True)
     # Reusing an already verified complete pack never touches profiles.
     marker = output / "build.json"
-    inputs = [ROOT / "tools/layout.json", ROOT / "tools/assets.json", Path(__file__)]
+    inputs = [
+        ROOT / "tools/layout.json",
+        ROOT / "tools/assets.json",
+        Path(__file__),
+        ROOT / "tools/animations.py",
+    ]
     identity = {p.name: digest(p) for p in inputs}
     if marker.is_file() and json.loads(marker.read_text()).get("inputs") == identity:
         verify(output)
         return output
+    if marker.is_file():
+        previous = json.loads(marker.read_text())
+        if all(
+            previous.get("inputs", {}).get(k) == identity[k] for k in ("layout.json", "assets.json")
+        ):
+            # Add complete cosmetic timelines to an existing verified pack. Do
+            # not rewrite scene.json: its checksum identifies existing saves.
+            verify(output)
+            with zipfile.ZipFile(ipa) as bundle:
+                ambient = build_animations(
+                    bundle, json.loads((output / "scene.json").read_text()), manifest
+                )
+            write_animations(output, ambient, identity, manifest["ipa_sha256"])
+            return output
     if output.exists():
         raise ValueError("Pack is stale/incomplete; choose a NEW --output; never overwrite a save")
     with tempfile.TemporaryDirectory(prefix="warzone-pack-", dir=output.parent) as tmp:
@@ -131,13 +152,31 @@ def prepare(ipa, output):
             (staging / "scene.json").write_text(
                 json.dumps(scene, ensure_ascii=False, separators=(",", ":")) + "\n"
             )
-            (staging / "build.json").write_text(
-                json.dumps({"inputs": identity, "ipa_sha256": manifest["ipa_sha256"]}, indent=2)
-                + "\n"
+            write_animations(
+                staging, build_animations(bundle, scene, manifest), identity, manifest["ipa_sha256"]
             )
             verify(staging)
             staging.rename(output)
     return output
+
+
+def write_animations(pack, ambient, identity, ipa_sha):
+    temporary = pack / "ambient.json.tmp"
+    temporary.write_text(json.dumps(ambient, ensure_ascii=False, separators=(",", ":")) + "\n")
+    temporary.replace(pack / "ambient.json")
+    temporary = pack / "build.json.tmp"
+    temporary.write_text(
+        json.dumps(
+            {
+                "inputs": identity,
+                "ipa_sha256": ipa_sha,
+                "ambient_sha256": digest(pack / "ambient.json"),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    temporary.replace(pack / "build.json")
 
 
 def verify(pack):
@@ -147,6 +186,9 @@ def verify(pack):
     expected[scene["hud"]["bold_font"]] = scene["hud"]["bold_font_sha256"]
     expected.update({v["path"]: v["sha256"] for v in scene["presentation"]["fonts"].values()})
     expected.update({k: v["sha256"] for k, v in scene["audio"]["clips"].items()})
+    marker = json.loads((pack / "build.json").read_text())
+    if "ambient_sha256" in marker:
+        expected["ambient.json"] = marker["ambient_sha256"]
     for name, sha in expected.items():
         path = (pack / name).resolve()
         if not path.is_relative_to(pack.resolve()) or digest(path) != sha:

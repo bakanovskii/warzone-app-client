@@ -249,7 +249,12 @@ fn build_briefing(
                         .as_ref()
                         .is_some_and(|p| p.flag(&format!("Mission-{}", m.mission_id)))
                     {
-                        "Пройти снова".into()
+                        match state.language_id() {
+                            0 => "Replay mission",
+                            2 => "重玩任务",
+                            _ => "Пройти снова",
+                        }
+                        .into()
                     } else {
                         interface::lang(scene, "#start_mission", "Начать миссию").into()
                     }

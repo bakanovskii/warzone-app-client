@@ -117,10 +117,208 @@ fn animation_frames_are_shared_by_entity_clones() {
         let copy = entity.clone();
         for (a, b) in entity.tracks.iter().zip(copy.tracks.iter()) {
             assert!(Arc::ptr_eq(&a.frames, &b.frames));
+            if let (Some(a), Some(b)) = (&a.ambient, &b.ambient) {
+                assert!(Arc::ptr_eq(a, b));
+            }
             checked += 1;
         }
     }
     assert!(checked > 100);
+}
+
+#[test]
+fn all_base_models_upgrades_working_and_battle_idle_use_complete_timelines() {
+    let (mut scene, _, _) = fixture();
+    // Match the real startup path: the initial language is applied after load.
+    scene.select_language(1).unwrap();
+    let check = |tracks: &[warzone_app_client::Track]| {
+        for t in tracks.iter().filter(|t| t.fps > 0.) {
+            assert!(
+                t.ambient.is_some(),
+                "Missing ambient timeline: {}",
+                t.texture
+            );
+        }
+    };
+    for entity in &scene.entities {
+        check(&entity.tracks);
+    }
+    let world = scene.world.as_ref().unwrap();
+    for def in world.catalog.values() {
+        for tracks in def.variants.values() {
+            check(tracks);
+        }
+    }
+    for work in world.working.values() {
+        for tracks in work.normal.values().chain(work.alternate.values()) {
+            check(tracks);
+        }
+    }
+    for model in scene.upgrades.as_ref().unwrap().models.values() {
+        for tracks in model.variants.values() {
+            check(tracks);
+        }
+    }
+    let combat = scene.combat.as_ref().unwrap();
+    for tracks in combat
+        .sprites
+        .values()
+        .chain(combat.views.values().flat_map(|v| v.sprites.values()))
+    {
+        check(tracks);
+    }
+    // Attacks/runs/deaths have event clocks and one-shot lifetimes, not idle phases.
+    for tracks in combat.animations.values() {
+        assert!(tracks.iter().all(|t| t.ambient.is_none()));
+    }
+}
+
+#[test]
+fn replay_button_uses_selected_language_without_losing_ambient_clips() {
+    use warzone_app_client::{interface::Action, interface_campaign};
+    let (mut scene, mut state, _) = fixture();
+    let original = scene.clone();
+    let mission_id = scene
+        .combat
+        .as_ref()
+        .unwrap()
+        .campaign()
+        .next()
+        .unwrap()
+        .mission_id;
+    state
+        .systems
+        .as_mut()
+        .unwrap()
+        .preferences
+        .insert(format!("Mission-{mission_id}"), true.into());
+    let camera = Camera {
+        x: 0.,
+        y: 0.,
+        zoom: 1.,
+        width: 1920,
+        height: 1080,
+    };
+    for (language, text) in [
+        (0, "Replay mission"),
+        (1, "Пройти снова"),
+        (2, "重玩任务"),
+        (0, "Replay mission"),
+    ] {
+        state
+            .systems
+            .as_mut()
+            .unwrap()
+            .preferences
+            .insert("langID".into(), language.into());
+        scene.select_language(language).unwrap();
+        let mut view = View::default();
+        assert!(interface_campaign::build(
+            &mut view,
+            &scene,
+            &state,
+            &camera,
+            0,
+            true,
+            [0., 0.],
+            2.
+        ));
+        assert!(view.draws.iter().any(|d| matches!(
+            d.node.id.as_str(),
+            "startmissionbtn_txt" | "play_txt"
+        ) && d.node.text == text));
+        assert!(view.hits.iter().any(|h| h.action == Action::Primary));
+        for (&id, def) in &original.world.as_ref().unwrap().catalog {
+            for (&direction, tracks) in &def.variants {
+                for (a, b) in tracks
+                    .iter()
+                    .zip(&scene.world.as_ref().unwrap().catalog[&id].variants[&direction])
+                {
+                    if let Some(clip) = &a.ambient {
+                        assert!(Arc::ptr_eq(
+                            clip,
+                            b.ambient
+                                .as_ref()
+                                .expect("Language projection dropped ambient clip")
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn trooper_plays_all_fifty_idle_frames_and_flag_uses_original_fifteen_fps() {
+    let (scene, _, _) = fixture();
+    let world = scene.world.as_ref().unwrap();
+    let tracks = &world.catalog[&2001].variants[&warzone_app_client::world::SE];
+    let body = tracks
+        .iter()
+        .find(|t| {
+            t.ambient
+                .as_ref()
+                .is_some_and(|c| !c.symbol.contains("_shadow_"))
+        })
+        .unwrap();
+    let clip = body.ambient.as_ref().unwrap();
+    assert_eq!(clip.fps, 8.);
+    let warzone_app_client::animation::Kind::Clip { frames } = &clip.nodes[clip.roots[0]].kind
+    else {
+        panic!("Not a unit clip")
+    };
+    assert_eq!(frames.len(), 50);
+    let sprites = |track: &warzone_app_client::Track, t| {
+        serde_json::to_value(track.frame(t).collect::<Vec<_>>()).unwrap()
+    };
+    assert_ne!(sprites(body, 0.0001), sprites(body, 1.5001));
+    assert_eq!(sprites(body, 0.0001), sprites(body, 6.2501));
+    let flag = world
+        .catalog
+        .values()
+        .flat_map(|d| d.variants.values())
+        .flatten()
+        .find(|t| {
+            t.ambient
+                .as_ref()
+                .is_some_and(|c| c.symbol == "bs_animations_001_barracks_se_idle")
+        })
+        .unwrap();
+    assert_eq!(flag.ambient.as_ref().unwrap().fps, 15.);
+    assert_eq!(sprites(flag, 0.0001), sprites(flag, 20. / 15. + 0.0001));
+    assert_ne!(sprites(flag, 0.0001), sprites(flag, 2.0001));
+}
+
+#[test]
+fn independent_object_clocks_survive_world_rebuilds_and_large_time_values() {
+    use warzone_app_client::animation::idle_time;
+    let (scene, state, _) = fixture();
+    let a = state.world_entities(&scene).unwrap();
+    let b = state.world_entities(&scene).unwrap();
+    let units: Vec<_> = a.iter().filter(|e| e.type_id == 2001).collect();
+    let times: std::collections::BTreeSet<_> = units
+        .iter()
+        .map(|e| (idle_time(&e.uid, 0.) * 8.) as u64 % 50)
+        .collect();
+    assert!(
+        times.len() > 1,
+        "Identical squads must not share an idle phase"
+    );
+    for entity in a
+        .iter()
+        .filter(|e| e.tracks.iter().any(|t| t.ambient.is_some()))
+    {
+        let same = b.iter().find(|e| e.uid == entity.uid).unwrap();
+        assert_eq!(idle_time(&entity.uid, 217.71), idle_time(&same.uid, 217.71));
+        assert!(
+            (idle_time(&entity.uid, 217.71) - idle_time(&entity.uid, 217.70) - 0.01).abs() < 1e-10
+        );
+        for (a, b) in entity.tracks.iter().zip(&same.tracks) {
+            if let (Some(a), Some(b)) = (&a.ambient, &b.ambient) {
+                assert!(Arc::ptr_eq(a, b));
+            }
+        }
+    }
 }
 
 #[test]

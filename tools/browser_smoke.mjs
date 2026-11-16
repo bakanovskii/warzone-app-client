@@ -383,6 +383,23 @@ try {
         windowsVirtualKeyCode: 27,
       });
     await delay(500);
+    if (process.env.WARZONE_AMBIENT === "1") {
+      const ambient = await evaluate(
+        "JSON.parse(game.FS.readFile('/assets/ambient.json',{encoding:'utf8'}))",
+      );
+      if (ambient.format !== "warzone-ambient-v1" || ambient.clips.length < 800)
+        throw Error("Complete ambient timelines were not packaged");
+      const captures = [];
+      for (let i = 0; i < 8; i++) {
+        captures.push(await evaluate("performance.now()"));
+        await screenshot(`ambient-${i}`);
+        await delay(850);
+      }
+      await writeFile(
+        join(out, "ambient-captures.json"),
+        JSON.stringify({ clips: ambient.clips.length, captures }, null, 2),
+      );
+    }
     const scene = JSON.parse(await readFile("assets/pack/scene.json", "utf8"));
     const clickDuration =
       scene.audio.clips[scene.audio.events["ui/button_click"][0].path].frames / 44100;
