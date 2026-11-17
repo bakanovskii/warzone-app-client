@@ -1,5 +1,5 @@
 //! One locked native profile. Atomic replacement commits reward AND timer reset.
-//! A damaged/mismatched save is an error, never an implicit new game.
+//! Recover damaged writes from validated local backups, never an implicit new game.
 use crate::{
     Scene,
     production::{Command, State},
@@ -107,14 +107,9 @@ fn needs_quest_story_reader(state: &State) -> bool {
 fn needs_movement_bonus_reader(state: &State) -> bool {
     state.actions.iter().any(|a| a.kind == "mission_move_bonus")
 }
-fn decode(bytes: &[u8], scene: &Scene, seed: &str) -> Result<(State, bool), String> {
-    if bytes.len() > 16 * 1024 * 1024 {
-        return Err("Native save exceeds supported size".into());
-    }
-    let mut data: Envelope = serde_json::from_slice(bytes)
-        .map_err(|e| format!("Damaged native save: {e}; restore state.bak explicitly"))?;
-    if !matches!(
-        data.format.as_str(),
+fn supported_format(format: &str) -> bool {
+    matches!(
+        format,
         "warzone-desktop-save-v1"
             | "warzone-desktop-save-v2"
             | "warzone-desktop-save-v3"
@@ -123,9 +118,36 @@ fn decode(bytes: &[u8], scene: &Scene, seed: &str) -> Result<(State, bool), Stri
             | "warzone-desktop-save-v6"
             | "warzone-desktop-save-v7"
             | "warzone-desktop-save-v8"
-    ) || data.sha256 != digest(&serde_json::to_vec(&data.state).map_err(|e| e.to_string())?)
-    {
-        return Err("Native save checksum/version mismatch; refusing to reset it".into());
+    )
+}
+// Recover interrupted/corrupt bytes, but do not roll back a valid save from a
+// newer client, a different pack, or an invalid game-state/schema migration.
+fn damaged_write(bytes: &[u8]) -> bool {
+    let json: serde_json::Value = match serde_json::from_slice(bytes) {
+        Ok(value) => value,
+        Err(_) => return true,
+    };
+    if !json["format"].as_str().is_some_and(supported_format) {
+        return false;
+    }
+    match serde_json::from_value::<Envelope>(json) {
+        Ok(data) => {
+            serde_json::to_vec(&data.state).is_ok_and(|state| data.sha256 != digest(&state))
+        }
+        Err(_) => true,
+    }
+}
+fn decode(bytes: &[u8], scene: &Scene, seed: &str) -> Result<(State, bool), String> {
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Err("Native save exceeds supported size".into());
+    }
+    let mut data: Envelope =
+        serde_json::from_slice(bytes).map_err(|e| format!("Damaged native save: {e}"))?;
+    if !supported_format(&data.format) {
+        return Err("Unsupported save version; refusing to replace it with an older backup".into());
+    }
+    if data.sha256 != digest(&serde_json::to_vec(&data.state).map_err(|e| e.to_string())?) {
+        return Err("Native save checksum mismatch; refusing to reset it".into());
     }
     if data.state.seed_sha256 != seed
         && !scene.provenance["compatible_native_seeds"]
@@ -203,31 +225,37 @@ fn read_regular(path: &Path) -> Result<Option<Vec<u8>>, String> {
         Err(e) => Err(e.to_string()),
     }
 }
-fn atomic_file(directory: &Path, name: &str, data: &[u8]) -> Result<(), String> {
-    // create_new does not follow a stale/symlink temporary file. The process ID
-    // makes an interrupted writer's temp harmless to a later run.
-    #[cfg(not(target_os = "emscripten"))]
-    let temp = directory.join(format!(".{name}.{}.tmp", std::process::id()));
-    // Emscripten reuses its synthetic PID across page reloads. A failed write
-    // must not leave a PID-named temp that permanently blocks the next launch.
-    #[cfg(target_os = "emscripten")]
-    let temp = directory.join(format!(
-        ".{name}.{}.tmp",
+fn temporary_path(directory: &Path, name: &str) -> Result<PathBuf, String> {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // PIDs can repeat after a reboot (and always repeat in Emscripten). Stale
+    // crash temporaries must not block a future save or recovery transaction.
+    Ok(directory.join(format!(
+        ".{name}.{}.{}.tmp",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| e.to_string())?
-            .as_nanos()
-    ));
+            .as_nanos(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )))
+}
+fn atomic_file(directory: &Path, name: &str, data: &[u8]) -> Result<(), String> {
+    // create_new refuses symlinks and never overwrites a pre-existing temporary.
+    let temp = temporary_path(directory, name)?;
     let write = || -> std::io::Result<()> {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temp)?;
         file.write_all(data)?;
+        // IDBFS fsync flushes the entire mount, including temporary files.
+        // Web commits once after BOTH final renames, in browser::persist().
+        #[cfg(not(target_os = "emscripten"))]
         file.sync_all()?;
         drop(file);
         fs::rename(&temp, directory.join(name))?;
-        File::open(directory)?.sync_all()
+        #[cfg(not(target_os = "emscripten"))]
+        File::open(directory)?.sync_all()?;
+        Ok(())
     };
     let result=write().map_err(|e|format!("Native save I/O failed ({name}): {e}. Stop and reload the profile before any further action."));
     // On failure leave the temp for diagnosis; never remove a pre-existing file.
@@ -242,7 +270,7 @@ fn atomic_file(directory: &Path, name: &str, data: &[u8]) -> Result<(), String> 
 /// crash-recovery ordering. No published in-memory state changes on failure.
 #[cfg(not(target_os = "emscripten"))]
 fn backup_file(directory: &Path) -> Result<(), String> {
-    let temp = directory.join(format!(".state.bak.{}.tmp", std::process::id()));
+    let temp = temporary_path(directory, "state.bak")?;
     let backup = || -> std::io::Result<()> {
         fs::hard_link(directory.join("state.json"), &temp)?;
         fs::rename(&temp, directory.join("state.bak"))?;
@@ -254,6 +282,8 @@ pub struct Profile {
     directory: PathBuf,
     _lock: File,
     pub state: State,
+    /// A compatible backup was validated and restored; the UI must tell users.
+    pub recovered_from: Option<String>,
     saved: Vec<u8>,
 }
 impl Profile {
@@ -279,20 +309,62 @@ impl Profile {
         #[cfg(not(target_os = "emscripten"))]
         lock.try_lock()
             .map_err(|e| format!("Native profile is already in use (or lock unavailable): {e}"))?;
-        let existing = read_regular(&directory.join("state.json"))?;
-        if existing.is_none() && read_regular(&directory.join("state.bak"))?.is_some() {
-            return Err("state.json is missing but state.bak exists; restore explicitly, do not silently reimport".into());
+        let mut existing = read_regular(&directory.join("state.json"))?;
+        let current = existing.as_ref().map(|bytes| decode(bytes, scene, seed));
+        let missing = existing.is_none();
+        let damaged = current.as_ref().is_some_and(Result::is_err)
+            && existing.as_ref().is_some_and(|bytes| damaged_write(bytes));
+        let mut recovered_from = None;
+        if missing || damaged {
+            let mut backups_exist = false;
+            for name in ["state.bak", "state.checkpoint.bak"] {
+                let Some(bytes) = read_regular(&directory.join(name))? else {
+                    continue;
+                };
+                backups_exist = true;
+                if !decode(&bytes, scene, seed).is_ok_and(|(state, _)| state.test_only == test_only)
+                {
+                    continue;
+                }
+                if let Some(original) = &existing {
+                    // Preserve the exact broken bytes for manual repair/export.
+                    let quarantine = temporary_path(&directory, "state.damaged")?;
+                    let name = quarantine.file_name().unwrap().to_string_lossy();
+                    atomic_file(&directory, &name, original)?;
+                }
+                atomic_file(&directory, "state.json", &bytes)?;
+                crate::browser::persist()?;
+                eprintln!("Recovered save from {name}; the last uncommitted actions may be lost");
+                crate::browser::save_recovered();
+                existing = Some(bytes);
+                recovered_from = Some(name.to_string());
+                break;
+            }
+            if recovered_from.is_none() && (damaged || backups_exist) {
+                return Err("Save is damaged or missing and no valid compatible backup was found; original files were preserved. Import an exported save to recover; refusing to start a new game.".into());
+            }
         }
-        let (mut state, version_migration) = if let Some(bytes) = &existing {
-            decode(bytes, scene, seed)?
+        let (mut state, version_migration) = if recovered_from.is_some() {
+            decode(existing.as_ref().unwrap(), scene, seed)?
         } else {
-            (State::seed(scene, seed.into())?, false)
+            match current {
+                Some(result) => result?,
+                None => (State::seed(scene, seed.into())?, false),
+            }
         };
         if existing.is_none() {
             state.test_only = test_only;
         }
         if state.test_only != test_only {
             return Err("Diagnostic and ordinary profiles must be separate".into());
+        }
+        // Keep an additional validated session-start checkpoint. It is not
+        // overwritten on every click, nor during recovery from the main backup.
+        if recovered_from.is_none()
+            && let Some(bytes) = &existing
+        {
+            atomic_file(&directory, "state.checkpoint.bak", bytes)?;
+            crate::browser::persist()?;
         }
         let migrated = state.initialize_systems(scene)?;
         let achievement_migration = state.initialize_achievement_counters(scene)?;
@@ -304,6 +376,7 @@ impl Profile {
             directory,
             _lock: lock,
             state: state.clone(),
+            recovered_from,
             saved: existing.unwrap_or_default(),
         };
         if profile.saved.is_empty()

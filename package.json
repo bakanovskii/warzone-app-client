@@ -2,9 +2,10 @@
   "name": "warzone-app-client-tools",
   "private": true,
   "scripts": {
-    "lint": "biome lint tools/browser_smoke.mjs web/*.js web/*.css web/index.html",
-    "format": "biome format --write tools/browser_smoke.mjs web/*.js web/*.css web/index.html package.json biome.json",
-    "check": "biome check tools/browser_smoke.mjs web/*.js web/*.css web/index.html package.json biome.json"
+    "lint": "biome lint tools/*.mjs web/*.js web/*.css web/index.html",
+    "format": "biome format --write tools/*.mjs web/*.js web/*.css web/index.html package.json biome.json",
+    "check": "biome check tools/*.mjs web/*.js web/*.css web/index.html package.json biome.json",
+    "test": "node --test tools/*.test.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.7"

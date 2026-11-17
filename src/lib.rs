@@ -393,6 +393,27 @@ impl Scene {
         accept: impl Fn(&Entity) -> bool,
         position: impl Fn(&Entity) -> [f64; 2],
     ) -> Option<usize> {
+        self.pick_positions(camera, screen, accept, position, false)
+    }
+    /// Battle cells start at integer coordinates. Keep picking independent of
+    /// whether this view retains the source catalogs.
+    pub fn pick_battle_filtered_positions(
+        &self,
+        camera: &Camera,
+        screen: [f64; 2],
+        accept: impl Fn(&Entity) -> bool,
+        position: impl Fn(&Entity) -> [f64; 2],
+    ) -> Option<usize> {
+        self.pick_positions(camera, screen, accept, position, true)
+    }
+    fn pick_positions(
+        &self,
+        camera: &Camera,
+        screen: [f64; 2],
+        accept: impl Fn(&Entity) -> bool,
+        position: impl Fn(&Entity) -> [f64; 2],
+        battle: bool,
+    ) -> Option<usize> {
         let w = camera.world(screen);
         let p = self.projection.inverse(w[0], w[1]);
         let picked = self.entities.iter().enumerate().rev().find_map(|(i, e)| {
@@ -408,23 +429,22 @@ impl Scene {
                 return (((local[0] / 40.).powi(2) + ((local[1] - 15.) / 40.).powi(2)) <= 1.)
                     .then_some(i);
             }
-            if e.archived["state"].as_i64() == Some(3) {
-                if let Some(shapes) = self
+            if e.archived["state"].as_i64() == Some(3)
+                && let Some(shapes) = self
                     .world
                     .as_ref()
                     .and_then(|c| c.hit_areas.get(&e.type_id))
                     .and_then(|v| v.get(&e.direction))
                     .filter(|v| !v.is_empty())
-                {
-                    return shapes.iter().any(|a| a.contains(local)).then_some(i);
-                }
+            {
+                return shapes.iter().any(|a| a.contains(local)).then_some(i);
             }
             // CJSONDraw marks its bitmap children non-touchable. When no
             // authored shape accepts the tap, SceneMain uses its tile lookup;
             // transparent fence textures must not steal neighboring unit taps.
             let [x, y, width, height] = e.footprint();
             let (x, y) = (x + at[0] - e.x, y + at[1] - e.y);
-            let margin = if self.world.is_none() && self.combat.is_some() {
+            let margin = if battle || self.world.is_none() && self.combat.is_some() {
                 0.
             } else {
                 0.5

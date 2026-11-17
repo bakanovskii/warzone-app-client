@@ -13,6 +13,10 @@ EM_ASYNC_JS(int, wz_sync_save, (), {
     }
 });
 
+EM_JS(void, wz_save_recovered, (), {
+    Module.warzoneRecoveredSave = true;
+});
+
 EM_JS(unsigned, wz_random, (), {
     return crypto.getRandomValues(new Uint32Array(1))[0];
 });

@@ -253,7 +253,7 @@ impl Ui {
             .as_ref()
             .map(|(p, t)| (p, t.elapsed().as_secs_f64()));
         self.view
-            .pick_filtered_positions(&self.camera, screen, accept, |e| {
+            .pick_battle_filtered_positions(&self.camera, screen, accept, |e| {
                 motion
                     .and_then(|(p, t)| p.sample(&e.uid, t))
                     .map_or([e.x, e.y], |p| [p.x, p.y])
@@ -305,8 +305,7 @@ impl Ui {
                 continue;
             }
             if !self
-                .view
-                .pick(&self.camera, [q[0] as f64, q[1] as f64])
+                .pick_current([q[0] as f64, q[1] as f64], |_| true)
                 .is_some_and(|i| self.view.entities[i].uid == uid)
             {
                 continue;
@@ -1492,8 +1491,10 @@ impl Ui {
                                 .map(|_| Command::Tutorial(T::Leave)));
                         }
                         let picked = self
-                            .view
-                            .pick(&self.camera, [x as f64, y as f64])
+                            .pick_current([x as f64, y as f64], |e| {
+                                b.index(&e.uid)
+                                    .is_some_and(|i| b.units[i].hp > 0 && !b.units[i].damaged)
+                            })
                             .and_then(|i| b.index(&self.view.entities[i].uid))
                             .filter(|i| b.units[*i].hp > 0 && !b.units[*i].damaged);
                         if let Some(i) = picked {

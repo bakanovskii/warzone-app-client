@@ -2,7 +2,6 @@
 """Build the native client or the Emscripten browser distribution."""
 
 import argparse
-import hashlib
 import json
 import os
 import shutil
@@ -10,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 from prepare import ROOT, prepare
+from web_cache import version_distribution
 
 
 def run(*args, env=None):
@@ -68,7 +68,14 @@ def loading_layout(source, dist):
 
 
 def web_shell(dist):
-    for name in ("index.html", "style.css", "app.js", "audio.js", "manifest.webmanifest"):
+    for name in (
+        "index.html",
+        "style.css",
+        "app.js",
+        "audio.js",
+        "storage.js",
+        "manifest.webmanifest",
+    ):
         shutil.copyfile(ROOT / "web" / name, dist / name)
     source = ROOT / "assets/ipa"
     for name, relative in {
@@ -145,23 +152,7 @@ def web_shell(dist):
             "1",
             dist / f"icon-{size}.png",
         )
-    sha = hashlib.sha256()
-    sha.update((ROOT / "web/sw.js").read_bytes())
-    files = sorted(path for path in dist.iterdir() if path.is_file() and path.name != "sw.js")
-    for path in files:
-        sha.update(path.name.encode())
-        with path.open("rb") as stream:
-            while data := stream.read(1024 * 1024):
-                sha.update(data)
-    tag = sha.hexdigest()[:20]
-    for name in ("index.html", "style.css", "loading-layout.css", "app.js", "manifest.webmanifest"):
-        path = dist / name
-        path.write_text(path.read_text().replace("__WEB_BUILD__", tag))
-    script = (ROOT / "web/sw.js").read_text().replace("__BUILD_HASH__", tag)
-    script = script.replace(
-        "__PRECACHE_FILES__", json.dumps(["./", *[p.name + "?v=" + tag for p in files]])
-    )
-    (dist / "sw.js").write_text(script)
+    version_distribution(dist, (ROOT / "web/sw.js").read_text())
 
 
 def build(web=False):
@@ -213,7 +204,7 @@ def build(web=False):
         "FORCE_FILESYSTEM=1",
         "LZ4=1",
         "EXPORTED_FUNCTIONS=['_main','_wz_cancel_pointer','_wz_validate_import']",
-        "EXPORTED_RUNTIME_METHODS=['FS','IDBFS','addRunDependency','removeRunDependency','callMain','setCanvasSize']",
+        "EXPORTED_RUNTIME_METHODS=['FS','IDBFS','callMain','setCanvasSize']",
     ]
     flags += ["-Clink-arg=-s" + s for s in settings]
     flags += [

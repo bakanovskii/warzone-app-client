@@ -2,6 +2,7 @@
 #[cfg(target_os = "emscripten")]
 unsafe extern "C" {
     fn wz_sync_save() -> i32;
+    fn wz_save_recovered();
     fn wz_random() -> u32;
     fn wz_next_frame();
     fn wz_viewport(ww: u32, wh: u32, rw: u32, rh: u32);
@@ -78,6 +79,13 @@ pub fn persist() -> Result<(), String> {
         return Err("Browser save failed; export your save before closing this tab".into());
     }
     Ok(())
+}
+
+pub fn save_recovered() {
+    #[cfg(target_os = "emscripten")]
+    unsafe {
+        wz_save_recovered();
+    }
 }
 
 pub fn yield_frame(_duration: std::time::Duration) {

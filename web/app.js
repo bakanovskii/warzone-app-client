@@ -5,7 +5,9 @@ let game,
   importedSave;
 const loadingStatus = document.querySelector("#loading-status");
 const downloads = { wasm: 0, data: 0 };
-const asset = (name) => `${name}?v=__WEB_BUILD__`;
+const assetVersions = __ASSET_VERSIONS__;
+const asset = (name) => `${name}?v=${assetVersions[name]}`;
+const resourceCache = "wz-assets-v1";
 const loader = document.querySelector("#loading");
 const stage = document.querySelector("#game-stage");
 const phone = () =>
@@ -75,11 +77,41 @@ const loadScript = () =>
     script.onerror = () => reject(Error("Не удалось загрузить клиент"));
     document.head.append(script);
   }));
-async function downloadWasm() {
-  const response = await fetch(asset("game.wasm"));
-  if (!response.ok) throw Error("Не удалось загрузить WASM-клиент");
+async function downloadGameFile(name, phase) {
+  const url = asset(name);
+  let cache, response;
+  try {
+    cache = await caches.open(resourceCache);
+    response = await cache.match(url);
+  } catch (error) {
+    console.warn("Warzone resource cache:", error);
+  }
+  const local = !!response;
+  let cached = Promise.resolve();
+  if (!response) {
+    response = await fetch(url, { cache: "force-cache" });
+    if (!response.ok) throw Error(`Не удалось загрузить ${name}`);
+    // Drain both streams concurrently; do not hold a second complete package
+    // in JS memory or download it again when preparing offline mode.
+    if (cache)
+      cached = cache.put(url, response.clone()).catch((error) => {
+        console.warn("Warzone resource cache:", error);
+      });
+  }
   const total = Number(response.headers.get("Content-Length"));
-  if (!response.body) return new Uint8Array(await response.arrayBuffer());
+  const label = local
+    ? phase === "wasm"
+      ? "Читаем WASM-клиент с устройства…"
+      : "Читаем игровые ресурсы с устройства…"
+    : phase === "wasm"
+      ? "Загружаем WASM-клиент…"
+      : "Загружаем игровые ресурсы…";
+  if (!response.body) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    await cached;
+    downloads[phase] = 1;
+    return bytes;
+  }
   const reader = response.body.getReader(),
     chunks = [];
   let loaded = 0;
@@ -88,7 +120,7 @@ async function downloadWasm() {
     if (done) break;
     chunks.push(value);
     loaded += value.length;
-    showProgress("Загружаем WASM-клиент…", "wasm", loaded, total);
+    showProgress(label, phase, loaded, total);
   }
   const bytes = new Uint8Array(loaded);
   let offset = 0;
@@ -96,7 +128,8 @@ async function downloadWasm() {
     bytes.set(chunk, offset);
     offset += chunk.length;
   }
-  downloads.wasm = 1;
+  await cached;
+  downloads[phase] = 1;
   return bytes;
 }
 const size = () => {
@@ -112,6 +145,17 @@ const fail = (error) => {
     ? "Игра уже открыта в другой вкладке. Закрой её, чтобы продолжить здесь."
     : `Не удалось запустить игру: ${message}`;
   statusText.classList.add("error");
+  const rescue = document.querySelector("#rescue-save");
+  rescue.hidden = true;
+  try {
+    // Even a failed disk commit can leave a useful complete copy in memory.
+    rescue.hidden = !game?.FS?.readFile("/saves/main/state.json").length;
+  } catch {
+    // A missing main file must never be synthesized just to enable export.
+  }
+  running = false;
+  canvas.hidden = true;
+  document.querySelector("#toolbar").hidden = true;
   document.querySelector("#start").disabled = false;
   document.querySelector("#restore").disabled = false;
   document.querySelector("#loading").hidden = true;
@@ -123,6 +167,7 @@ const fail = (error) => {
 async function launch() {
   statusText.textContent = "";
   statusText.classList.remove("error");
+  document.querySelector("#rescue-save").hidden = true;
   document.querySelector("#start").disabled = true;
   document.querySelector("#restore").disabled = true;
   document.querySelector("#welcome").hidden = true;
@@ -133,20 +178,40 @@ async function launch() {
   showProgress("Загружаем WASM-клиент…");
   // Resume audio in the actual user gesture, before downloading the module.
   window.WarzoneAudio.init();
+  void window.WarzoneStorage.requestPersistence();
   // One live writer per origin; a second tab must not overwrite a running game.
   const play = async () => {
+    let runtimeError, stopRuntime;
+    const stopped = new Promise((_, reject) => {
+      stopRuntime = reject;
+    });
+    // Aborts can happen before factory initialization has finished.
+    stopped.catch(() => {});
     await loadScript();
-    const wasmBinary = await downloadWasm();
+    const wasmBinary = await downloadGameFile("game.wasm", "wasm");
+    const wasmModule = await WebAssembly.compile(wasmBinary);
+    const packageData = await downloadGameFile("game.data", "data");
     const [width, height] = size();
     canvas.width = width;
     canvas.height = height;
     game = await createWarzone({
       canvas,
       noInitialRun: true,
-      wasmBinary,
+      instantiateWasm: (imports, receive) => {
+        const instance = new WebAssembly.Instance(wasmModule, imports);
+        receive(instance, wasmModule);
+        return instance.exports;
+      },
+      getPreloadedPackage: () => packageData.buffer,
       locateFile: asset,
       print: (line) => console.log(line),
-      printErr: (line) => console.error(line),
+      printErr: (line) => {
+        console.error(line);
+        if (line.startsWith("warzone-app-client: ")) {
+          runtimeError = Error(line.slice("warzone-app-client: ".length));
+          stopRuntime(runtimeError);
+        }
+      },
       setStatus: (text) => {
         const bytes = text.match(/\((\d+)\/(\d+)\)/);
         if (bytes)
@@ -155,25 +220,14 @@ async function launch() {
       monitorRunDependencies: (left) => {
         if (!left) showProgress("Подготавливаем игру…");
       },
-      onAbort: (error) => fail(Error(String(error))),
-      preRun: [
-        (module) => {
-          module.addRunDependency("saved-game");
-          module.FS.mkdirTree("/saves/main");
-          module.FS.mount(module.IDBFS, {}, "/saves");
-          module.FS.syncfs(true, (error) => {
-            if (error) {
-              fail(error);
-              return;
-            }
-            // Mounting IDBFS hides the directory created in the underlying MEMFS.
-            // An empty browser needs this directory before importing its first save.
-            module.FS.mkdirTree("/saves/main");
-            module.removeRunDependency("saved-game");
-          });
-        },
-      ],
+      onAbort: (error) => stopRuntime(Error(String(error))),
     });
+    // Runtime initialization must finish before accessing the filesystem. A
+    // failed read rejects launch and releases its lock; no run dependency hangs.
+    game.FS.mkdirTree("/saves");
+    game.FS.mount(game.IDBFS, {}, "/saves");
+    window.WarzoneStorage.configure(game);
+    await window.WarzoneStorage.populate(game);
     if (importedSave) {
       game.FS.writeFile("/tmp/import.json", importedSave);
       if (game._wz_validate_import() !== 0)
@@ -183,6 +237,10 @@ async function launch() {
         game.FS.writeFile("/saves/main/import-before.json", game.FS.readFile(target));
       } catch (_) {}
       game.FS.writeFile(target, importedSave);
+      // The import is a new checkpoint; keep the previous profile separately,
+      // rather than letting an unrelated old backup undo the explicit import.
+      game.FS.writeFile("/saves/main/state.bak", importedSave);
+      game.FS.writeFile("/saves/main/state.checkpoint.bak", importedSave);
       await new Promise((resolve, reject) =>
         game.FS.syncfs(false, (error) => (error ? reject(error) : resolve())),
       );
@@ -195,7 +253,7 @@ async function launch() {
     // A rotation can happen while the large data package is being loaded.
     const [readyWidth, readyHeight] = size();
     game.setCanvasSize(readyWidth, readyHeight);
-    game.callMain([
+    const exitCode = game.callMain([
       "--pack",
       "/assets",
       "--profile",
@@ -203,13 +261,15 @@ async function launch() {
       "--window-size",
       `${readyWidth}x${readyHeight}`,
     ]);
+    if (exitCode)
+      throw runtimeError || Error("Игра завершилась с ошибкой. Сохранение не сброшено.");
     // Avoid fetching/caching the large IPA package alongside initial WASM
     // compilation and MEMFS population on memory-constrained devices.
     if ("serviceWorker" in navigator && isSecureContext) {
       setTimeout(() => installOfflineCache(), 5000);
     }
     // Asyncify may return control while the Rust loop is suspended. Retain lock.
-    await new Promise(() => {});
+    await stopped;
   };
   try {
     if (navigator.locks) {
@@ -258,6 +318,7 @@ document.querySelector("#export").onclick = () => {
     alert(`Не удалось скачать сохранение: ${error.message}`);
   }
 };
+document.querySelector("#rescue-save").onclick = () => document.querySelector("#export").click();
 document.querySelector("#fullscreen").onclick = async () => {
   try {
     if (document.fullscreenElement) await document.exitFullscreen();
@@ -517,6 +578,14 @@ addEventListener(
     document.body.classList.add("playing");
     fitLoader();
     positionToolbar();
+    if (game?.warzoneRecoveredSave) {
+      game.warzoneRecoveredSave = false;
+      setTimeout(() => {
+        alert(
+          "Сохранение восстановлено из резервной копии. Последние действия могли не сохраниться.",
+        );
+      }, 0);
+    }
   },
   { once: true },
 );
@@ -531,7 +600,11 @@ async function offlineState() {
 }
 async function installOfflineCache() {
   try {
-    await navigator.serviceWorker.register("sw.js");
+    const registration = await navigator.serviceWorker.register("sw.js");
+    // A previously active worker is not reinstalled when the script is
+    // unchanged. Explicitly repair evicted/missing cache entries in that case.
+    if (!registration.installing && !registration.waiting)
+      registration.active?.postMessage({ type: "offline-prepare" });
     await offlineState();
   } catch (error) {
     offlineLabel.textContent =

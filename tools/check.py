@@ -28,6 +28,7 @@ checks = [
     ("ruff-lint", ["ruff", "check", "."]),
     ("ruff-format", ["ruff", "format", "--check", "."]),
     ("web-lint-format", ["npm", "run", "check"]),
+    ("web-storage-cache", ["npm", "test"]),
     (
         "animation-export",
         [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tools", "-p", "test_*.py"],

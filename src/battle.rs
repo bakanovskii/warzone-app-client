@@ -173,6 +173,16 @@ impl Zone {
             && self.y + OFFSET <= p[1]
             && p[1] < self.y + OFFSET + self.h
     }
+    fn contains_trigger(&self, p: [i32; 2], relaxed: bool) -> bool {
+        // One-cell story checkpoints become strips; landing/AI geometry and
+        // the tutorial's exact scripted cells keep their authored dimensions.
+        let dx = i32::from(relaxed && self.kind != 2 && self.w == 1);
+        let dy = i32::from(relaxed && self.kind != 2 && self.h == 1);
+        p[0] >= self.x + OFFSET - dx
+            && p[1] >= self.y + OFFSET - dy
+            && p[0] < self.x + OFFSET + self.w + dx
+            && p[1] < self.y + OFFSET + self.h + dy
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mission {
@@ -955,13 +965,29 @@ impl Battle {
                             uid: self.units[u].uid.clone(),
                             route: r.clone(),
                         });
-                        let prev = if r.len() > 1 {
-                            r[r.len() - 2]
-                        } else {
-                            [-1, -1]
-                        };
                         let e = &self.units[u];
-                        events.push((202,json!({"eX0":prev[0],"eY0":prev[1],"eX1":end[0],"eY1":end[1],"type":e.id,"isEnemy":e.enemy,"uid":e.uid,"fraction":e.fraction})));
+                        let relaxed = self.tutorial.is_none();
+                        let zones = &c.missions[&self.mission].zones;
+                        let mut crossing = |prev: [i32; 2], next: [i32; 2]| {
+                            // Emit only boundary crossings, in route order. A
+                            // deep destination (or a route through a thin zone)
+                            // must not lose an earlier enter/leave event.
+                            if r.len() == 1
+                                || zones.iter().any(|zone| {
+                                    zone.contains_trigger(prev, relaxed)
+                                        != zone.contains_trigger(next, relaxed)
+                                })
+                            {
+                                events.push((202,json!({"eX0":prev[0],"eY0":prev[1],"eX1":next[0],"eY1":next[1],"type":e.id,"isEnemy":e.enemy,"uid":e.uid,"fraction":e.fraction})));
+                            }
+                        };
+                        if r.len() == 1 {
+                            crossing([-1, -1], end);
+                        } else {
+                            for pair in r.windows(2) {
+                                crossing(pair[0], pair[1]);
+                            }
+                        }
                         if self.tutorial.is_some() {
                             self.tutorial_moved(c, u)?;
                         }
@@ -1724,9 +1750,11 @@ impl Battle {
             return c.missions[&self.mission].zones.iter().any(|zone| {
                 (z.is_none() || z == Some("{ANY}") || z == Some(zone.name.as_str()))
                     && if code == 200 {
-                        zone.contains(p1) && !zone.contains(p0)
+                        zone.contains_trigger(p1, self.tutorial.is_none())
+                            && !zone.contains_trigger(p0, self.tutorial.is_none())
                     } else {
-                        zone.contains(p0) && !zone.contains(p1)
+                        zone.contains_trigger(p0, self.tutorial.is_none())
+                            && !zone.contains_trigger(p1, self.tutorial.is_none())
                     }
             });
         }
@@ -2624,5 +2652,130 @@ impl Config {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod trigger_checks {
+    use super::*;
+
+    fn config(height: i32, fraction: &str) -> Config {
+        let triggers = ["enter", "leave"].map(|ev| {
+            json!({"name":ev,
+                "events":[{"name":"UnitEnterOrLeaveZone", "data":{
+                    "mEv":ev, "mZoneFilter":{"mZoneId":"checkpoint"},
+                    "mUnitFilter":{"mFraction":fraction}}}],
+                "actions":[{"name":"MessageBoxAction", "data":ev}]})
+        });
+        serde_json::from_value(json!({
+            "defs": {"2100": {"group":"units", "alias":"test", "model":"test",
+                "width":1, "height":1, "health":10, "attack":0,
+                "distance":0, "speed":20, "ability":0, "heavy":false}},
+            "missions": {"route": {"mission":"route", "mission_id":1, "title":"Route",
+                "entities":[{"uid":"player", "id":2100, "x":5, "y":12, "fraction":"player"}],
+                "obstacles":[], "zones":[{"name":"checkpoint", "x":0,
+                    "y":if height == 1 {9} else {5}, "w":16, "h":height}],
+                "triggers":triggers,
+                "fractions":[], "locked":[], "fog":[0,0,128,128], "map_data":[]}},
+            "sprites":{}, "animations":{}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn movement_crosses_thin_zones_and_enters_deep_zones_without_stopping_on_the_edge() {
+        for (height, end, expected) in [
+            (1, [5, 5], vec!["enter", "leave"]),
+            (6, [5, 6], vec!["enter"]),
+            // Stop alongside the authored single-cell checkpoint.
+            (1, [5, 10], vec!["enter"]),
+        ] {
+            let c = config(height, "player");
+            let mut battle = Battle::new(&c, "route", vec![]).unwrap();
+            battle.phase = "battle".into();
+            assert!(battle.player_move(&c, 0, end).unwrap());
+            assert_eq!(battle.log, expected, "height {height}, end {end:?}");
+        }
+        // Passing the same checkpoints with the wrong faction must not fire.
+        let c = config(1, "enemy");
+        let mut battle = Battle::new(&c, "route", vec![]).unwrap();
+        battle.phase = "battle".into();
+        assert!(battle.player_move(&c, 0, [5, 5]).unwrap());
+        assert!(battle.log.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_strips_preserve_landing_tutorial_and_wide_zone_dimensions() {
+        let mut zone = Zone {
+            name: "checkpoint".into(),
+            x: 10,
+            y: 10,
+            w: 16,
+            h: 1,
+            kind: 0,
+        };
+        for y in 9..=11 {
+            assert!(zone.contains_trigger([OFFSET + 15, OFFSET + y], true));
+        }
+        for p in [[9, 10], [26, 10], [15, 8], [15, 12]] {
+            assert!(!zone.contains_trigger(p.map(|v| v + OFFSET), true));
+        }
+        assert!(!zone.contains_trigger([OFFSET + 15, OFFSET + 9], false));
+        assert!(!zone.contains([OFFSET + 15, OFFSET + 9]));
+        zone.kind = 2;
+        assert!(!zone.contains_trigger([OFFSET + 15, OFFSET + 9], true));
+        zone.kind = 0;
+        zone.h = 5;
+        assert!(!zone.contains_trigger([OFFSET + 15, OFFSET + 9], true));
+        zone.w = 1;
+        assert!(zone.contains_trigger([OFFSET + 9, OFFSET + 12], true));
+        assert!(!zone.contains_trigger([OFFSET + 8, OFFSET + 12], true));
+    }
+
+    #[test]
+    fn source_mission_checkpoint_events_accept_their_zone_boundaries() {
+        let scene = crate::Scene::load(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/pack"),
+        )
+        .unwrap();
+        let c = scene.combat.as_ref().unwrap();
+        let mut checked = 0;
+        for (name, mission) in &c.missions {
+            let battle = Battle::new(c, name, vec![]).unwrap();
+            for event in mission
+                .triggers
+                .iter()
+                .flat_map(|t| t["events"].as_array().unwrap())
+                .filter(|e| e["name"] == "UnitEnterOrLeaveZone")
+            {
+                let zone = mission
+                    .zones
+                    .iter()
+                    .find(|z| {
+                        Some(z.name.as_str()) == event["data"]["mZoneFilter"]["mZoneId"].as_str()
+                    })
+                    .unwrap();
+                let dy = i32::from(battle.tutorial.is_none() && zone.kind != 2 && zone.h == 1);
+                let x = zone.x + zone.w / 2 + OFFSET;
+                let y = zone.y + zone.h + dy + OFFSET;
+                let filter = &event["data"]["mUnitFilter"];
+                let fraction = filter["mFraction"]
+                    .as_str()
+                    .filter(|f| *f != "{ANY}")
+                    .unwrap_or("player");
+                let uid = filter["mSceneId"]
+                    .as_str()
+                    .filter(|id| *id != "{ANY}")
+                    .unwrap_or("checkpoint-test");
+                let data = json!({"eX0":x, "eY0":y, "eX1":x, "eY1":y-1, "fraction":fraction, "uid":uid, "type":2001});
+                assert!(
+                    battle.event_matches(c, event, 200, &data),
+                    "{name}: {}",
+                    zone.name
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 20, "Only checked {checked} source events");
     }
 }

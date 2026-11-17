@@ -75,6 +75,22 @@ const rpc = (method, params = {}) =>
     pending.set(id, { resolve, reject });
     ws.send(JSON.stringify({ id, method, params }));
   });
+// DevTools page emulation does not disable the service worker's own transport.
+// An isolated runner can pass its test-server PID to exercise real timeouts.
+const serverPid = Number(process.env.WARZONE_SMOKE_SERVER_PID || 0);
+let serverPaused = false;
+const connection = async (offline) => {
+  await rpc("Network.emulateNetworkConditions", {
+    offline,
+    latency: 0,
+    downloadThroughput: 0,
+    uploadThroughput: 0,
+  });
+  if (serverPid && offline !== serverPaused) {
+    process.kill(serverPid, offline ? "SIGSTOP" : "SIGCONT");
+    serverPaused = offline;
+  }
+};
 const evaluate = async (expression) => {
   const r = await rpc("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
   if (r.exceptionDetails) throw Error(JSON.stringify(r.exceptionDetails));
@@ -171,7 +187,7 @@ try {
   const panelCenter = await evaluate(
     "(()=>{const r=document.querySelector('.welcome-panel').getBoundingClientRect();return r.x+r.width/2})()",
   );
-  if (Math.abs(panelCenter - (await evaluate("innerWidth/2"))) > 2)
+  if (Math.abs(panelCenter - (await evaluate("document.documentElement.clientWidth/2"))) > 2)
     throw Error("Welcome controls are not centered");
   if ((await evaluate("document.querySelectorAll('.community a svg').length")) !== 2)
     throw Error("Community icon buttons missing");
@@ -874,13 +890,23 @@ try {
   );
   await screenshot("second-tab-warning");
   await evaluate("document.querySelector('#second-writer').remove()");
+  // Mark this disposable profile's installed HTML. An online launch with the
+  // same release hash must return that copy, rather than fetch a fresh page.
+  const releaseHash = await evaluate(`(async () => {
+    const version = await (await fetch('version.json', {cache:'no-store'})).json();
+    if(!/^[a-f0-9]{20}$/.test(version.build))throw Error('Invalid release manifest');
+    const cache = await caches.open('warzone-'+version.build);
+    const page = await cache.match('./');
+    if(!page)throw Error('Installed page missing');
+    await cache.put('./', new Response((await page.text()).replace('<html', '<html data-cache-probe="confirmed"'),
+      {headers:{'Content-Type':'text/html; charset=utf-8'}}));
+    return version.build;
+  })()`);
+  await reload();
+  if ((await evaluate("document.documentElement.dataset.cacheProbe")) !== "confirmed")
+    throw Error("An unchanged online release did not reuse the installed page");
   // Reload from the installed cache with transport disabled; saves survive reload.
-  await rpc("Network.emulateNetworkConditions", {
-    offline: true,
-    latency: 0,
-    downloadThroughput: 0,
-    uploadThroughput: 0,
-  });
+  await connection(true);
   await reload();
   await evaluate("document.querySelector('#start').click()");
   await until(() =>
@@ -893,6 +919,81 @@ try {
   );
   if (JSON.stringify(after.state.resources) !== JSON.stringify(state.state.resources))
     throw Error("Resources changed on offline reload");
+  const strictDurability = await evaluate(
+    "game.IDBFS.dbs['/saves'].transaction('FILE_DATA','readwrite').durability==='strict'",
+  );
+  if (!strictDurability) throw Error("Save transactions are not durable");
+  await connection(false);
+  await evaluate("caches.open(resourceCache).then(cache=>cache.delete(asset('icon-512.png')))");
+  await evaluate("installOfflineCache()");
+  await until(
+    () =>
+      evaluate(
+        "caches.open(resourceCache).then(cache=>cache.match(asset('icon-512.png'))).then(Boolean)",
+      ),
+    30,
+  );
+  await connection(true);
+  // Corrupt only this disposable browser profile. A null file record is absent
+  // from IDBFS's timestamp index; a missing parent must not hide valid backups.
+  await rpc("Page.addScriptToEvaluateOnNewDocument", {
+    source: "globalThis.alert = message => { globalThis.warzoneRecoveryNotice = message; };",
+  });
+  await reload();
+  const recoveryWallet = await evaluate(`new Promise((resolve, reject) => {
+    const request = indexedDB.open('/saves');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      const transaction = db.transaction('FILE_DATA', 'readwrite', {durability:'strict'});
+      const store = transaction.objectStore('FILE_DATA');
+      const backup = store.get('/saves/main/state.bak');
+      let resources;
+      backup.onsuccess = () => {
+        const checkpoint = store.get('/saves/main/state.checkpoint.bak');
+        checkpoint.onsuccess = () => {
+          const snapshot = backup.result || checkpoint.result;
+          resources = JSON.parse(new TextDecoder().decode(snapshot.contents)).state.resources;
+          if (checkpoint.result)
+            store.put({...checkpoint.result, timestamp:42}, '/saves/main/state.checkpoint.bak');
+          store.put(null, '/saves/main/state.json');
+          store.delete('/saves/main');
+        };
+      };
+      transaction.oncomplete = () => {db.close();resolve(resources);};
+      transaction.onabort = transaction.onerror = () => reject(transaction.error);
+    };
+  })`);
+  await evaluate("document.querySelector('#start').click()");
+  await until(() => evaluate("!!globalThis.warzoneRecoveryNotice"));
+  if (
+    JSON.stringify(
+      await evaluate(
+        "JSON.parse(game.FS.readFile('/saves/main/state.json',{encoding:'utf8'})).state.resources",
+      ),
+    ) !== JSON.stringify(recoveryWallet)
+  )
+    throw Error("Recovery did not restore the validated backup wallet");
+  if (
+    !(await evaluate(
+      "game.FS.readdir('/saves/main').some(name=>name.startsWith('.state.damaged.'))",
+    ))
+  )
+    throw Error("Recovery discarded the damaged save");
+  if (!(await evaluate("game.FS.analyzePath('/saves/main/storage-damaged.json').exists")))
+    throw Error("Damaged storage metadata was not preserved");
+  const abortedTransaction = await evaluate(`new Promise((resolve, reject) => {
+    const db = game.IDBFS.dbs['/saves'];
+    const transaction = db.transaction('FILE_DATA', 'readwrite');
+    transaction.objectStore('FILE_DATA').put(null, '/saves/main/state.json');
+    transaction.onabort = () => {
+      const read = db.transaction('FILE_DATA','readonly').objectStore('FILE_DATA').get('/saves/main/state.json');
+      read.onsuccess = () => resolve(!!read.result?.contents?.length);
+      read.onerror = () => reject(read.error);
+    };
+    transaction.abort();
+  })`);
+  if (!abortedTransaction) throw Error("An aborted save transaction damaged committed progress");
   // Import UI is available before main starts. Test it at that real lifecycle
   // point, instead of loading a second Scene alongside a running game.
   await reload();
@@ -912,11 +1013,58 @@ try {
   );
   if (JSON.stringify(preserved.state.resources) !== JSON.stringify(after.state.resources))
     throw Error("Rejected import changed the saved wallet");
+  if (await evaluate("document.querySelector('#rescue-save').hidden"))
+    throw Error("A failed launch hid the available save export");
+  await reload();
+  await evaluate(`new Promise((resolve,reject)=>{
+    const request=indexedDB.open('/saves');
+    request.onsuccess=()=>{
+      const db=request.result;
+      const transaction=db.transaction('FILE_DATA','readwrite',{durability:'strict'});
+      for(const name of ['state.json','state.bak','state.checkpoint.bak'])
+        transaction.objectStore('FILE_DATA').put(null,'/saves/main/'+name);
+      transaction.oncomplete=()=>{db.close();resolve(true)};
+      transaction.onabort=transaction.onerror=()=>reject(transaction.error);
+    };
+    request.onerror=()=>reject(request.error);
+  })`);
+  await evaluate("document.querySelector('#start').click()");
+  await until(() => evaluate("statusText.textContent.includes('no valid compatible backup')"), 120);
+  const refusedReset = await evaluate(`new Promise((resolve,reject)=>{
+    const request=indexedDB.open('/saves');
+    request.onsuccess=()=>{
+      const db=request.result;
+      const read=db.transaction('FILE_DATA','readonly').objectStore('FILE_DATA').get('/saves/main/state.json');
+      read.onsuccess=()=>{db.close();resolve(read.result===null)};
+      read.onerror=()=>reject(read.error);
+    };
+    request.onerror=()=>reject(request.error);
+  })`);
+  if (!refusedReset) throw Error("An unrecoverable save was silently replaced");
+  // A failed launch must release the writer lock so an explicit valid import
+  // can recover from the welcome page without clearing any site data.
+  const validImport = Buffer.from(JSON.stringify(after)).toString("base64");
+  await evaluate(
+    `importedSave=Uint8Array.from(atob(${JSON.stringify(validImport)}),c=>c.charCodeAt(0));document.querySelector('#start').click()`,
+  );
+  await until(() => evaluate("document.body.classList.contains('playing')"), 120);
   const report = {
     format: "warzone-browser-smoke-v1",
     rendered: true,
     serviceWorker,
+    releaseHash,
+    unchangedOnlinePageReused: true,
     offlineReload: true,
+    offlineServerSuspended: !!serverPid,
+    strictDurability,
+    incompleteCacheRepair: true,
+    backupRecovery: true,
+    missingStorageDirectoryRecovery: true,
+    nullStorageRecordRecovery: true,
+    abortedTransaction,
+    unrecoverableSaveNotReset: true,
+    importAfterFailedLaunch: true,
+    saveExportAfterFailedLaunch: true,
     secondWriterBlocked: true,
     saveFormat: state.format,
     entities: Object.keys(state.state.entities).length,
@@ -961,6 +1109,7 @@ try {
   );
   throw error;
 } finally {
+  if (serverPaused) process.kill(serverPid, "SIGCONT");
   clearInterval(memoryTimer);
   ws?.close();
   browser.kill("SIGTERM");

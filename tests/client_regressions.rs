@@ -19,6 +19,249 @@ fn fixture() -> (Scene, State, String) {
 }
 
 #[test]
+fn battle_target_cells_are_aligned_on_every_map_and_zoom() {
+    use std::collections::BTreeMap;
+    use warzone_app_client::battle::Battle;
+    let (scene, _, _) = fixture();
+    let combat = scene.combat.as_ref().unwrap();
+    let mut checked = 0;
+    for mission in combat.missions.keys() {
+        let battle = Battle::new(combat, mission, vec![]).unwrap();
+        let view = battle
+            .render_scene_with_models(&scene, &BTreeMap::new())
+            .unwrap();
+        for entity in &view.entities {
+            if [1026, 1028].contains(&entity.type_id) {
+                continue; // Resource fields resolve to their harvester, not themselves.
+            }
+            let anchor = view.projection.project(entity.x, entity.y);
+            let points = if entity.kind == "unit" {
+                vec![
+                    [anchor[0] - 20., anchor[1] + 15.],
+                    [anchor[0] + 20., anchor[1] + 15.],
+                ]
+            } else {
+                let [x, y, w, h] = entity.footprint();
+                vec![
+                    // This lower corner was outside the shifted lean-view hitbox.
+                    view.projection.project(x + w - 0.1, y + h - 0.1),
+                    view.projection.project(x + 0.1, y + 0.1),
+                ]
+            };
+            for zoom in [0.12, 0.5, 1., 2.] {
+                let camera = Camera {
+                    x: anchor[0],
+                    y: anchor[1],
+                    zoom,
+                    width: 1920,
+                    height: 1080,
+                };
+                for point in &points {
+                    let picked = view.pick_battle_filtered_positions(
+                        &camera,
+                        camera.screen(*point),
+                        |e| e.uid == entity.uid,
+                        |e| [e.x, e.y],
+                    );
+                    assert_eq!(
+                        picked.map(|i| &view.entities[i].uid),
+                        Some(&entity.uid),
+                        "{}: {} facing {} at {zoom}",
+                        mission,
+                        entity.uid,
+                        entity.direction
+                    );
+                }
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked > 500, "Only checked {checked} targets");
+}
+
+#[test]
+fn battle_picking_preserves_neighbors_filters_and_moving_poses() {
+    use std::collections::BTreeMap;
+    use warzone_app_client::battle::Battle;
+    let (scene, _, _) = fixture();
+    let battle = Battle::new(scene.combat.as_ref().unwrap(), "mission_1", vec![]).unwrap();
+    let mut view = battle
+        .render_scene_with_models(&scene, &BTreeMap::new())
+        .unwrap();
+    let mut first = view
+        .entities
+        .iter()
+        .find(|e| e.kind == "unit")
+        .unwrap()
+        .clone();
+    first.x = 10.;
+    first.y = 10.;
+    first.uid = "front".into();
+    let mut neighbor = first.clone();
+    neighbor.x = 11.;
+    neighbor.uid = "neighbor".into();
+    view.entities = vec![neighbor, first];
+    let camera = Camera {
+        x: 0.,
+        y: 0.,
+        zoom: 0.5,
+        width: 1920,
+        height: 1080,
+    };
+    let anchor = view.projection.project(11., 10.);
+    let click = camera.screen([anchor[0], anchor[1] + 15.]);
+    let pick = |point, accept: fn(&warzone_app_client::Entity) -> bool| {
+        view.pick_battle_filtered_positions(&camera, point, accept, |e| [e.x, e.y])
+    };
+    assert_eq!(
+        pick(click, |_| true),
+        Some(0),
+        "Front target stole a neighbor hit"
+    );
+    assert_eq!(pick(click, |e| e.uid == "front"), None);
+    assert_eq!(pick(click, |_| false), None);
+    let anchor = view.projection.project(15., 16.);
+    let click = camera.screen([anchor[0], anchor[1] + 15.]);
+    assert_eq!(
+        pick(click, |_| true),
+        None,
+        "Distant empty ground must remain empty"
+    );
+    assert_eq!(
+        view.pick_battle_filtered_positions(&camera, click, |e| e.uid == "front", |_| [15., 16.]),
+        Some(1)
+    );
+    // Catalog retention must not change the interactive battle hitbox.
+    view.combat = scene.combat.clone();
+    assert_eq!(
+        view.pick_battle_filtered_positions(&camera, click, |e| e.uid == "front", |_| [15., 16.]),
+        Some(1)
+    );
+}
+
+#[test]
+fn interrupted_saves_recover_only_valid_compatible_backups_without_resetting() {
+    use std::fs;
+    let (scene, _, seed) = fixture();
+    let root = std::env::temp_dir().join(format!("warzone-recovery-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    for fault in [
+        "truncated",
+        "checksum",
+        "missing",
+        "both",
+        "all",
+        "future",
+        "seed",
+        "stale",
+    ] {
+        let path = root.join(fault);
+        let starting;
+        {
+            let mut profile = Profile::open(&path, &scene, &seed, true).unwrap();
+            starting = profile.state.resources["realMoney"];
+            let mut state = profile.state.clone();
+            state.resources.insert("realMoney".into(), starting + 10);
+            profile.commit(&scene, state).unwrap();
+        }
+        {
+            // Save a session checkpoint at +10, then two distinct revisions.
+            let mut profile = Profile::open(&path, &scene, &seed, true).unwrap();
+            for amount in [20, 30] {
+                let mut state = profile.state.clone();
+                state
+                    .resources
+                    .insert("realMoney".into(), starting + amount);
+                profile.commit(&scene, state).unwrap();
+            }
+        }
+        let original = fs::read(path.join("state.json")).unwrap();
+        match fault {
+            "missing" => fs::remove_file(path.join("state.json")).unwrap(),
+            "checksum" => {
+                let mut json: serde_json::Value = serde_json::from_slice(&original).unwrap();
+                json["state"]["resources"]["realMoney"] = 999999.into();
+                fs::write(path.join("state.json"), serde_json::to_vec(&json).unwrap()).unwrap();
+            }
+            "future" | "seed" => {
+                let mut json: serde_json::Value = serde_json::from_slice(&original).unwrap();
+                if fault == "future" {
+                    json["format"] = "warzone-desktop-save-v999".into();
+                } else {
+                    let mut state: State = serde_json::from_value(json["state"].take()).unwrap();
+                    state.seed_sha256 = "different-seed".into();
+                    json["sha256"] = digest(&serde_json::to_vec(&state).unwrap()).into();
+                    json["state"] = serde_json::to_value(state).unwrap();
+                }
+                fs::write(path.join("state.json"), serde_json::to_vec(&json).unwrap()).unwrap();
+            }
+            "stale" => {
+                for name in ["state.json", "state.bak"] {
+                    fs::write(
+                        path.join(format!(".{name}.{}.tmp", std::process::id())),
+                        b"interrupted",
+                    )
+                    .unwrap();
+                }
+            }
+            _ => {
+                fs::write(path.join("state.json"), b"{\"format\":").unwrap();
+                if matches!(fault, "both" | "all") {
+                    fs::write(path.join("state.bak"), b"damaged backup").unwrap();
+                }
+                if fault == "all" {
+                    fs::write(path.join("state.checkpoint.bak"), b"damaged checkpoint").unwrap();
+                }
+            }
+        }
+        let broken = fs::read(path.join("state.json")).ok();
+        let result = Profile::open(&path, &scene, &seed, true);
+        if matches!(fault, "all" | "future" | "seed") {
+            assert!(result.is_err(), "{fault} was silently reset/replaced");
+            assert_eq!(fs::read(path.join("state.json")).ok(), broken);
+            continue;
+        }
+        let mut profile = result.unwrap_or_else(|error| panic!("{fault}: {error}"));
+        let expected = if fault == "both" {
+            10
+        } else if fault == "stale" {
+            30
+        } else {
+            20
+        };
+        assert_eq!(
+            profile.state.resources["realMoney"],
+            starting + expected,
+            "{fault}"
+        );
+        assert_eq!(profile.recovered_from.is_some(), fault != "stale");
+        if fault != "stale" && fault != "missing" {
+            let quarantined: Vec<_> = fs::read_dir(&path)
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".state.damaged.")
+                })
+                .collect();
+            assert_eq!(quarantined.len(), 1, "{fault}");
+            assert_eq!(fs::read(quarantined[0].path()).unwrap(), broken.unwrap());
+        }
+        // Recovery must also support the next durable write and a clean reopen.
+        let mut state = profile.state.clone();
+        state.resources.insert("realMoney".into(), starting + 40);
+        profile.commit(&scene, state).unwrap();
+        drop(profile);
+        let reopened = Profile::open(&path, &scene, &seed, true).unwrap();
+        assert_eq!(reopened.state.resources["realMoney"], starting + 40);
+        assert!(reopened.recovered_from.is_none());
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn every_priced_plot_can_be_bought_picked_and_reopened() {
     let (scene, mut state, seed) = fixture();
     state.resources.insert("realMoney".into(), 1_000_000);

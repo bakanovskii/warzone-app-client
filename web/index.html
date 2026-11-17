@@ -26,6 +26,9 @@
         <input id="save-file" type="file" accept="application/json,.json" hidden>
         <p class="autosave">Игра сохраняется автоматически на вашем устройстве.</p>
         <p id="status" role="status" aria-live="polite"></p>
+        <button type="button" id="rescue-save" class="game-button secondary" hidden>
+          Скачать сохранение
+        </button>
         <p id="offline-status" role="status"></p>
         <button id="install" class="install-link" type="button" hidden>
           Установить на устройство
@@ -107,6 +110,7 @@
       </nav>
     </div>
     <script src="audio.js?v=__WEB_BUILD__"></script>
+    <script src="storage.js?v=__WEB_BUILD__"></script>
     <script src="app.js?v=__WEB_BUILD__"></script>
   </body>
 </html>

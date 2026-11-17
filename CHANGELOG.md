@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0
+
+### Improvements
+
+- Check a small release-hash manifest at startup and reuse the installed page when unchanged or the server is unreachable.
+
+### Bugfixes
+
+- Trigger mission checkpoints along the entire movement route, including crossing a zone without stopping; widen one-cell story checkpoints into forgiving strips.
+- Align battle object hitboxes with their cells, including lean render views.
+- Reuse unchanged web resources across releases, avoid duplicate WASM and asset-package downloads, and retain completed files after interrupted caching.
+- Repair incomplete offline caches and distinguish local resource reads from network downloads in the loader.
+- Request persistent browser storage on game launch and use strict IndexedDB save durability where supported.
+- Load browser saves after filesystem initialization and tolerate damaged file metadata without silently creating a new profile.
+- Recover damaged or missing saves from validated backups, preserve broken files, and retain an additional session checkpoint.
+- Commit browser saves and backups together, without intermediate whole-filesystem flushes.
+
 ## 0.1.2 (16 Nov 2026)
 
 ### Bugfixes
