@@ -332,10 +332,12 @@ pub fn build(
         let Some(u) = up.items.get(&id) else {
             return false;
         };
+        if let Some(unit) = unit {
+            tree(v, scene, state, camera, unit, scroll);
+        }
+        v.hits.clear();
+        v.blocks.clear();
         if info {
-            if let Some(unit) = unit {
-                tree(v, scene, state, camera, unit, scroll);
-            }
             let mut layout = c.symbols["upgrade_info"].clone();
             // UpgradeInfoDialog.updateGUIForUpgrade: calcSize all four labels,
             // then centre their combined height at82 with4/12/4pt gaps.
@@ -379,7 +381,6 @@ pub fn build(
             let root = &layout;
             let o = origin(root);
             v.popup_shade(&root.nodes[0], camera);
-            v.hits.clear();
             v.add(
                 root,
                 o,
@@ -445,6 +446,7 @@ pub fn build(
         let o = origin(root);
         let inputs: Vec<_> = u.items.iter().collect();
         let quote = state.upgrade_quote(scene, u).ok();
+        v.popup_shade(&root.nodes[0], camera);
         v.add(
             root,
             o,

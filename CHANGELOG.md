@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1 (18 Nov 2026)
+
+### Bugfixes
+
+- Keep the oil counter in sync with inventory after leaving a campaign mission.
+- Keep the academy tree and its scroll position visible behind upgrade dialogs.
+
 ## 0.2.0 (17 Nov 2026)
 
 ### Improvements

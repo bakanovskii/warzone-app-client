@@ -1466,6 +1466,7 @@ impl Ui {
             A::UpgradeOpen(id) | A::UpgradeInfo(id) => {
                 self.upgrade_detail = Some(id);
                 self.upgrade_info = matches!(action, A::UpgradeInfo(_));
+                self.scroll_velocity = 0.;
             }
             A::UpgradeStart(id) => {
                 if let Some(cmd) = self
@@ -2192,6 +2193,8 @@ impl Ui {
             }
             let view = self.event_view(event, scene, state, camera).unwrap();
             self.scroll_maximum = view.scroll_max;
+            let scroll_allowed = self.notice.is_none()
+                && !(self.kind == Some(Kind::Upgrades) && self.upgrade_detail.is_some());
             if self.kind == Some(Kind::Sell)
                 && matches!(
                     event,
@@ -2244,7 +2247,7 @@ impl Ui {
                                 | Kind::Shop
                                 | Kind::Upgrades
                         )
-                    ) && self.notice.is_none() =>
+                    ) && scroll_allowed =>
                 {
                     let distance = if self.kind == Some(Kind::LeaguesHelp) {
                         warzone_app_client::interface_leagues::page_width(scene, camera)
@@ -2286,7 +2289,7 @@ impl Ui {
                                 | Kind::Shop
                                 | Kind::Upgrades
                         )
-                    ) && self.notice.is_none()
+                    ) && scroll_allowed
                         && view.draws.iter().filter_map(|d| d.clip).any(|r| {
                             warzone_app_client::interface::contains(r, [*x as f64, *y as f64])
                         })
@@ -2376,7 +2379,7 @@ impl Ui {
                                 | Kind::Shop
                                 | Kind::Upgrades
                         )
-                    ) && self.notice.is_none() =>
+                    ) && scroll_allowed =>
                 {
                     if let Some((start, scroll)) = self.scroll_drag {
                         let delta = start

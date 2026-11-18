@@ -44,37 +44,37 @@ impl Playback {
             self.initialize(state.revision);
             return;
         };
-        let context = state
-            .mission
-            .as_ref()
-            .filter(|_| !state.mission_paused())
-            .map(|m| m.id.clone());
-        if self.context != context {
+        let mission = state.mission.as_ref().filter(|_| !state.mission_paused());
+        let context = mission.map(|m| m.id.as_str());
+        if self.context.as_deref() != context {
             self.held.clear();
-            self.context = context;
+            self.context = context.map(str::to_owned);
         }
         for a in state.actions.iter().filter(|a| a.sequence > before) {
-            let cosmetic = matches!(
-                a.kind.as_str(),
-                "collect" | "workshop_collect" | "mission_move_bonus" | "mission_destroy_bonus"
-            );
+            let mission_target = match a.kind.as_str() {
+                "mission_move_bonus" | "mission_destroy_bonus" => mission
+                    .filter(|m| a.source.as_ref().is_some_and(|s| s.uid == m.id))
+                    .and_then(|m| {
+                        m.battle
+                            .units
+                            .iter()
+                            .find(|u| u.uid == a.uid)
+                            .map(|u| (m, u))
+                    }),
+                _ => None,
+            };
+            // Delay the HUD only if this view can actually play the reward.
+            // The base may receive a battle receipt after the mission has closed.
+            let animate_gain = mission_target.is_some()
+                || (mission.is_none()
+                    && matches!(a.kind.as_str(), "collect" | "workshop_collect")
+                    && state.entities.contains_key(&a.uid));
             if a.gains.get("level").is_some_and(|n| *n > 0) {
                 self.held.clear();
             } else {
                 for (id, key) in [(1, "playMoney"), (2, "exp"), (4, "fuel"), (5, "iron")] {
                     if let Some(n) = a.gains.get(key).filter(|n| **n != 0) {
-                        if cosmetic
-                            && *n > 0
-                            && (a.kind != "mission_move_bonus"
-                                || state
-                                    .mission
-                                    .as_ref()
-                                    .filter(|_| !state.mission_paused())
-                                    .is_some_and(|m| {
-                                        a.source.as_ref().is_some_and(|s| s.uid == m.id)
-                                            && m.battle.units.iter().any(|u| u.uid == a.uid)
-                                    }))
-                        {
+                        if animate_gain && *n > 0 {
                             *self.held.entry(id).or_default() += n;
                         } else {
                             self.held.remove(&id);
@@ -124,88 +124,73 @@ impl Playback {
                 continue;
             }
             if a.kind == "mission_destroy_bonus" {
-                if let Some(m) = state
-                    .mission
-                    .as_ref()
-                    .filter(|_| !state.mission_paused())
-                    .filter(|m| a.source.as_ref().is_some_and(|s| s.uid == m.id))
-                {
-                    if let Some(u) = m.battle.units.iter().find(|u| u.uid == a.uid) {
-                        let mut delay = 0.;
-                        for (key, id) in [("exp", 2), ("playMoney", 1), ("fuel", 4), ("iron", 5)] {
-                            if let Some(count) = a.gains.get(key).filter(|n| **n > 0) {
-                                self.effects.push(Effect {
-                                    instance: 0,
-                                    drop_sound_pending: true,
-                                    mission: Some(m.id.clone()),
-                                    lifetime: 1.25,
-                                    position: [u.x - 16., u.y - 16.],
-                                    recipe: id,
-                                    sequence: a.sequence,
-                                    count: *count,
-                                    cosmetic: true,
-                                    offset: scatter(),
-                                    at: seconds + delay,
-                                    fly: None,
-                                    path: None,
-                                });
-                                delay += 0.2;
-                            }
+                if let Some((m, u)) = mission_target {
+                    let mut delay = 0.;
+                    for (key, id) in [("exp", 2), ("playMoney", 1), ("fuel", 4), ("iron", 5)] {
+                        if let Some(count) = a.gains.get(key).filter(|n| **n > 0) {
+                            self.effects.push(Effect {
+                                instance: 0,
+                                drop_sound_pending: true,
+                                mission: Some(m.id.clone()),
+                                lifetime: 1.25,
+                                position: [u.x - 16., u.y - 16.],
+                                recipe: id,
+                                sequence: a.sequence,
+                                count: *count,
+                                cosmetic: true,
+                                offset: scatter(),
+                                at: seconds + delay,
+                                fly: None,
+                                path: None,
+                            });
+                            delay += 0.2;
                         }
-                        for (key, count) in &a.gains {
-                            if let Some(id) = key.strip_prefix("item:").and_then(|s| s.parse().ok())
-                            {
-                                self.effects.push(Effect {
-                                    instance: 0,
-                                    drop_sound_pending: true,
-                                    mission: Some(m.id.clone()),
-                                    lifetime: 1.25,
-                                    position: [u.x - 16., u.y - 16.],
-                                    recipe: id,
-                                    sequence: a.sequence,
-                                    count: *count,
-                                    cosmetic: false,
-                                    offset: scatter(),
-                                    at: seconds + delay,
-                                    fly: None,
-                                    path: None,
-                                });
-                                delay += 0.2;
-                            }
+                    }
+                    for (key, count) in &a.gains {
+                        if let Some(id) = key.strip_prefix("item:").and_then(|s| s.parse().ok()) {
+                            self.effects.push(Effect {
+                                instance: 0,
+                                drop_sound_pending: true,
+                                mission: Some(m.id.clone()),
+                                lifetime: 1.25,
+                                position: [u.x - 16., u.y - 16.],
+                                recipe: id,
+                                sequence: a.sequence,
+                                count: *count,
+                                cosmetic: false,
+                                offset: scatter(),
+                                at: seconds + delay,
+                                fly: None,
+                                path: None,
+                            });
+                            delay += 0.2;
                         }
                     }
                 }
                 continue;
             }
             if a.kind == "mission_move_bonus" {
-                if let Some(m) = state
-                    .mission
-                    .as_ref()
-                    .filter(|_| !state.mission_paused())
-                    .filter(|m| a.source.as_ref().is_some_and(|s| s.uid == m.id))
-                {
-                    if let Some(u) = m.battle.units.iter().find(|u| u.uid == a.uid) {
-                        let delay = (crate::save::entropy().unwrap_or(0) % 10 / 5) as f64;
-                        self.effects.push(Effect {
-                            instance: 0,
-                            drop_sound_pending: true,
-                            mission: Some(m.id.clone()),
-                            lifetime: if m.battle.tutorial.is_some() {
-                                1.75
-                            } else {
-                                1.25
-                            },
-                            position: [u.x - 16., u.y - 16.],
-                            recipe: 2,
-                            sequence: a.sequence,
-                            count: 1,
-                            cosmetic: true,
-                            offset: scatter(),
-                            at: seconds + delay,
-                            fly: None,
-                            path: None,
-                        });
-                    }
+                if let Some((m, u)) = mission_target {
+                    let delay = (crate::save::entropy().unwrap_or(0) % 10 / 5) as f64;
+                    self.effects.push(Effect {
+                        instance: 0,
+                        drop_sound_pending: true,
+                        mission: Some(m.id.clone()),
+                        lifetime: if m.battle.tutorial.is_some() {
+                            1.75
+                        } else {
+                            1.25
+                        },
+                        position: [u.x - 16., u.y - 16.],
+                        recipe: 2,
+                        sequence: a.sequence,
+                        count: 1,
+                        cosmetic: true,
+                        offset: scatter(),
+                        at: seconds + delay,
+                        fly: None,
+                        path: None,
+                    });
                 }
                 continue;
             }
@@ -357,7 +342,7 @@ impl Playback {
         let future = self
             .effects
             .iter()
-            .filter(|e| e.cosmetic && e.recipe == id && e.at > seconds)
+            .filter(|e| e.mission == self.context && e.cosmetic && e.recipe == id && e.at > seconds)
             .map(|e| e.count)
             .sum::<i64>();
         if future == 0 {

@@ -19,6 +19,58 @@ fn fixture() -> (Scene, State, String) {
 }
 
 #[test]
+fn campaign_oil_reward_does_not_leave_a_stale_counter_on_base() {
+    use warzone_app_client::{
+        battle::Battle,
+        mission::Session,
+        production::{Action, ProductionSource},
+        reward_effects::Playback,
+    };
+    let (scene, mut state, _) = fixture();
+    let battle = Battle::new(scene.combat.as_ref().unwrap(), "mission_1", vec![]).unwrap();
+    let target = battle.units.iter().find(|u| u.kind == "building").unwrap();
+    let mut playback = Playback::default();
+    playback.initialize(state.revision);
+    state.revision += 1;
+    state.resources.insert("fuel".into(), 135);
+    state.actions.push(Action {
+        shop: None,
+        source: Some(ProductionSource {
+            uid: "mission-test".into(),
+            started: 0,
+        }),
+        sequence: state.revision,
+        at: 0,
+        at_ms: None,
+        uid: target.uid.clone(),
+        recipe: target.id,
+        kind: "mission_destroy_bonus".into(),
+        gains: [("fuel".into(), 3)].into(),
+        entropy: vec![],
+        quest_events_pending: vec![],
+    });
+
+    // The base can see the receipt for the first time after leaving the mission.
+    playback.update(&scene, &state, 0.);
+    assert_eq!(playback.hud_values(&scene, &state, 0).texts["fuel"], "135");
+
+    playback.initialize(state.revision - 1);
+    state.mission = Some(Session {
+        id: "mission-test".into(),
+        opened: 0,
+        reward_eligible: true,
+        camera: scene.camera,
+        camera_serial: 0,
+        battle,
+    });
+    playback.update(&scene, &state, 0.);
+    assert_eq!(playback.hud_values(&scene, &state, 0).texts["fuel"], "132");
+    state.mission = None;
+    playback.update(&scene, &state, 0.1);
+    assert_eq!(playback.hud_values(&scene, &state, 0).texts["fuel"], "135");
+}
+
+#[test]
 fn battle_target_cells_are_aligned_on_every_map_and_zoom() {
     use std::collections::BTreeMap;
     use warzone_app_client::battle::Battle;
@@ -771,6 +823,61 @@ fn academy_trees_cover_wide_and_tall_viewports_while_scrolling() {
                 assert!(close.rect[1] + close.rect[3] <= height as f64);
             }
         }
+    }
+}
+
+#[test]
+fn academy_upgrade_dialogs_keep_the_scrolled_tree_behind_them() {
+    use warzone_app_client::{interface::Action, interface_upgrades::build};
+    let (scene, state, _) = fixture();
+    let upgrades = scene.upgrades.as_ref().unwrap();
+    let unit = upgrades.unit_order[0];
+    let upgrade = upgrades.layers(unit).unwrap()[0][0];
+    let camera = Camera {
+        x: 0.,
+        y: 0.,
+        zoom: 1.,
+        width: 1920,
+        height: 1080,
+    };
+    let scroll = 240.;
+    let mut tree = View::default();
+    assert!(build(
+        &mut tree,
+        &scene,
+        &state,
+        &camera,
+        Some(unit),
+        None,
+        false,
+        scroll
+    ));
+    for info in [false, true] {
+        let mut dialog = View::default();
+        assert!(build(
+            &mut dialog,
+            &scene,
+            &state,
+            &camera,
+            Some(unit),
+            Some(upgrade),
+            info,
+            scroll
+        ));
+        assert!(dialog.modal);
+        assert_eq!(dialog.scroll_max, tree.scroll_max);
+        assert_eq!(dialog.draws[tree.draws.len()].node.id, "source_popup_shade");
+        for (actual, expected) in dialog.draws.iter().zip(&tree.draws) {
+            assert_eq!(actual.node.id, expected.node.id);
+            assert_eq!(actual.node.rect, expected.node.rect);
+        }
+        assert!(dialog.hits.iter().any(|h| h.action == Action::Close));
+        assert!(
+            !dialog
+                .hits
+                .iter()
+                .any(|h| matches!(h.action, Action::UpgradeOpen(_) | Action::UpgradeInfo(_)))
+        );
     }
 }
 
