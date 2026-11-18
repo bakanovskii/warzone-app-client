@@ -777,6 +777,8 @@ fn wide_panels_cover_the_viewport_and_controls_follow_their_art() {
 #[test]
 fn academy_trees_cover_wide_and_tall_viewports_while_scrolling() {
     let (scene, state, _) = fixture();
+    let upgrades = scene.upgrades.as_ref().unwrap();
+    let (mut dashed_links, mut round_turns) = (0, 0);
     for (width, height) in [
         (960, 640),
         (1920, 1080),
@@ -791,7 +793,8 @@ fn academy_trees_cover_wide_and_tall_viewports_while_scrolling() {
             width,
             height,
         };
-        for unit in &scene.upgrades.as_ref().unwrap().unit_order {
+        for unit in &upgrades.unit_order {
+            let layers = upgrades.layers(*unit).unwrap();
             for scroll in [0., 500.] {
                 let mut view = View::default();
                 assert!(warzone_app_client::interface_upgrades::build(
@@ -821,7 +824,254 @@ fn academy_trees_cover_wide_and_tall_viewports_while_scrolling() {
                     .unwrap();
                 assert!(close.rect[0] + close.rect[2] <= width as f64);
                 assert!(close.rect[1] + close.rect[3] <= height as f64);
+                dashed_links += view
+                    .draws
+                    .iter()
+                    .filter(|d| d.node.id == "academy_connector_dash")
+                    .count();
+                round_turns += view
+                    .draws
+                    .iter()
+                    .filter(|d| {
+                        d.node.id == "academy_connector_turn" && d.node.rect[2] == d.node.rect[3]
+                    })
+                    .count();
+                let backdrop = |id| {
+                    let group = format!("upgrade_cell_{id}");
+                    view.draws
+                        .iter()
+                        .find(|d| d.node.parents.first() == Some(&group))
+                        .unwrap()
+                        .node
+                        .rect
+                };
+                for pair in layers.windows(2) {
+                    if pair[0].len() != 1
+                        || pair[1].len() != 3
+                        || upgrades.items[&pair[0][0]].model(*unit).is_none()
+                    {
+                        continue;
+                    }
+                    let [x, y, w, h] = backdrop(pair[0][0]);
+                    let turns = view
+                        .draws
+                        .iter()
+                        .filter_map(|d| {
+                            let [tx, ty, tw, th] = d.node.rect;
+                            (d.node.id == "academy_connector_turn"
+                                && (tx + tw / 2. - (x + w * 0.77)).abs() < 0.001)
+                                .then_some(ty + th / 2.)
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(
+                        turns.iter().any(|&ty| ty < y),
+                        "Missing upper turn for unit {unit}"
+                    );
+                    assert!(
+                        turns.iter().any(|&ty| ty > y + h),
+                        "Missing lower turn for unit {unit}"
+                    );
+                }
+                for layer in &layers {
+                    let mut cards: Vec<_> = layer.iter().map(|id| backdrop(*id)).collect();
+                    cards.sort_by(|a, b| a[1].total_cmp(&b[1]));
+                    for card in &cards {
+                        let lane = (card[1] + card[3] / 2.) / (height as f64 / 3.) - 0.5;
+                        assert!((0. ..=2.).contains(&lane.round()));
+                        assert!((lane - lane.round()).abs() < 0.001);
+                        if cards.len() == 1 {
+                            assert!((lane - 1.).abs() < 0.001);
+                        }
+                    }
+                    assert!(
+                        cards
+                            .windows(2)
+                            .all(|pair| pair[0][1] + pair[0][3] <= pair[1][1])
+                    );
+                    for id in layer {
+                        let [x, y, w, h] = backdrop(*id);
+                        let scale = warzone_app_client::hud::scale(&camera);
+                        let gap = 6. * scale;
+                        let endpoints = view
+                            .draws
+                            .iter()
+                            .filter(|d| {
+                                let [ax, ay, aw, ah] = d.node.rect;
+                                d.node.id == "academy_connector_arrow"
+                                    && if aw > ah {
+                                        (ax + aw + gap - x).abs() < 0.001
+                                            && ay >= y
+                                            && ay + ah <= y + h
+                                    } else {
+                                        ax >= x
+                                            && ax + aw <= x + w
+                                            && ((ay + ah + gap - y).abs() < 0.001
+                                                || (ay - gap - y - h).abs() < 0.001)
+                                    }
+                            })
+                            .count();
+                        assert_eq!(
+                            endpoints,
+                            upgrades.items[id].parents.len(),
+                            "unit {unit}, upgrade {id}"
+                        );
+                    }
+                }
+                // A third prerequisite may feed into the row above it. The
+                // two existing tracks must not move just because that row ends.
+                let center = |id| {
+                    let r = backdrop(id);
+                    r[1] + r[3] / 2.
+                };
+                // The branch order is a presentation choice, separate from
+                // prerequisite order. Keep the entire chain in the same row.
+                match unit {
+                    2005 => {
+                        assert!(center(11113) < center(11112));
+                        assert_eq!(center(11113), center(11115));
+                        assert_eq!(center(11112), center(11114));
+                    }
+                    2009 => {
+                        assert!(center(11127) < center(11126));
+                        assert!(center(11126) < center(11128));
+                        assert_eq!(center(11127), center(11135));
+                        assert_eq!(center(11126), center(11129));
+                    }
+                    2011 => {
+                        assert!(center(11183) < center(11184));
+                        assert!(center(11184) < center(11055));
+                        assert_eq!(center(11183), center(11186));
+                        assert_eq!(center(11055), center(11185));
+                    }
+                    _ => {}
+                }
+                let continuations = match unit {
+                    2005 => [(11009, 11111, 11014), (11010, 11013, 11015)],
+                    2007 => [(11024, 11117, 11029), (11025, 11028, 11030)],
+                    2017 => [(11017, 11105, 11022), (11018, 11021, 11110)],
+                    _ => continue,
+                };
+                for (start, linked, end) in continuations {
+                    assert!((center(start) - center(linked)).abs() < 0.001);
+                    assert!((center(linked) - center(end)).abs() < 0.001);
+                }
             }
+        }
+    }
+    assert!(dashed_links > 0 && round_turns > 0);
+}
+
+#[test]
+fn academy_lists_the_tank_discount_before_the_production_time_change() {
+    let (mut scene, _, _) = fixture();
+    for (language, expected) in [
+        (1, "Экономит 20%\nПроизводство: −1 час"),
+        (0, "Reduces costs 20%\nProduction: −1 hour"),
+        (2, "减少成本 20%\n生产: −1 小时"),
+    ] {
+        scene.select_language(language).unwrap();
+        let item = &scene.upgrades.as_ref().unwrap().items[&11138];
+        assert_eq!(
+            warzone_app_client::interface_upgrades::description(&scene, item)
+                .replace('\u{a0}', " "),
+            expected
+        );
+    }
+}
+
+#[test]
+fn academy_training_effects_wrap_inside_the_card_without_splitting_the_duration() {
+    let (mut scene, state, _) = fixture();
+    scene.select_language(1).unwrap();
+    let camera = Camera {
+        x: 0.,
+        y: 0.,
+        zoom: 1.,
+        width: 1920,
+        height: 1080,
+    };
+    let scale = warzone_app_client::hud::scale(&camera);
+    for (unit, upgrade) in [(2005, 11010), (2017, 11106)] {
+        let mut view = View::default();
+        assert!(warzone_app_client::interface_upgrades::build(
+            &mut view,
+            &scene,
+            &state,
+            &camera,
+            Some(unit),
+            None,
+            false,
+            0.,
+        ));
+        let group = format!("upgrade_cell_{upgrade}");
+        let nodes: Vec<_> = view
+            .draws
+            .iter()
+            .filter(|d| d.node.parents.first() == Some(&group))
+            .collect();
+        let card = nodes[0].node.rect;
+        let label = &nodes
+            .iter()
+            .find(|d| d.node.id == "upgrade_modifires_txt")
+            .unwrap()
+            .node;
+        assert!(label.multiline);
+        assert!(label.text.ends_with("−3\u{a0}минуты"));
+        assert!(label.rect[0] + label.rect[2] <= card[0] + card[2] - 7. * scale + 0.001);
+    }
+}
+
+#[test]
+fn academy_completion_uses_the_full_progress_track_only_at_100_percent() {
+    use warzone_app_client::interface_upgrades::build;
+    let (scene, mut state, _) = fixture();
+    let upgrades = scene.upgrades.as_ref().unwrap();
+    let unit = upgrades.unit_order[0];
+    let ids: Vec<_> = upgrades
+        .layers(unit)
+        .unwrap()
+        .into_iter()
+        .flatten()
+        .collect();
+    let camera = Camera {
+        x: 0.,
+        y: 0.,
+        zoom: 1.,
+        width: 960,
+        height: 640,
+    };
+    let group = format!("upgrades_unit_{unit}");
+    for completed in [0, 1, ids.len()] {
+        let systems = state.systems.as_mut().unwrap();
+        for (i, id) in ids.iter().enumerate() {
+            systems.set(format!("Upgrade-{id}"), i64::from(i < completed));
+        }
+        let mut view = View::default();
+        assert!(build(
+            &mut view, &scene, &state, &camera, None, None, false, 0.
+        ));
+        let draw = |id| {
+            view.draws
+                .iter()
+                .find(|d| d.node.id == id && d.node.parents.first() == Some(&group))
+                .unwrap()
+        };
+        let bar = draw("progressbar");
+        let frame = draw("progress").node.rect;
+        assert_eq!(bar.progress, completed as f64 / ids.len() as f64);
+        assert_eq!(
+            draw("progress_text").node.text,
+            format!("{}%", completed * 100 / ids.len())
+        );
+        let left = bar.node.rect[0] - frame[0];
+        let right = frame[0] + frame[2] - bar.node.rect[0] - bar.node.rect[2] * bar.progress;
+        if completed == ids.len() {
+            assert!(
+                (right - left).abs() < 0.001,
+                "The completed fill should reach both inner edges"
+            );
+        } else {
+            assert!(right > left);
         }
     }
 }

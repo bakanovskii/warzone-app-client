@@ -145,121 +145,118 @@ fn icon(v: &mut View, scene: &Scene, key: &str, center: [f64; 2], s: f64, clip: 
         clip,
     );
 }
-/// UpgradesTreeDialog.generatePathFrom:to:completed:option:0x15c181.
-/// The source uses real card frames, original29pt dashes, circular junctions
-/// and a directional arrow at the destination (including extended model cards).
+enum ConnectorEnd {
+    Side([f64; 2]),
+    Vertical([f64; 2]),
+    Branch([f64; 2]),
+}
+
+/// Draw an academy dependency with the client's existing dashed links and turn markers.
 fn draw_path(
     v: &mut View,
-    c: &crate::interface::Config,
-    color: &str,
-    from: [f64; 2],
-    to: [f64; 2],
-    from_size: [f64; 2],
-    to_size: [f64; 2],
-    option: bool,
-    s: f64,
+    c: &interface::Config,
+    completed: bool,
+    [start, from_y]: [f64; 2],
+    target: ConnectorEnd,
+    scale: f64,
     clip: [f64; 4],
 ) {
-    let right = from[0] + from_size[0] / 2.;
-    let left = to[0] - to_size[0] / 2.;
-    let dy = to[1] - from[1];
-    let (mut segments, arrow, arrow_at, corner) = if dy.abs() <= (left - right).abs() {
-        (
-            vec![([right, from[1]], [left - 31., to[1]], false)],
-            "r",
-            [left - 31., to[1]],
-            None,
-        )
-    } else if option {
-        let x = left + 50.;
-        let y = if dy > 0. {
-            to[1] - to_size[1] / 2. - 31.
-        } else {
-            to[1] + to_size[1] / 2.
-        };
-        (
-            vec![
-                ([right, from[1]], [x, from[1]], false),
-                ([x, from[1]], [x, if dy > 0. { y } else { y + 31. }], true),
-            ],
-            if dy > 0. { "d" } else { "u" },
-            [x, y],
-            Some([x, from[1]]),
-        )
-    } else {
-        let x = right - 50. - 12.;
-        (
-            vec![
-                ([x, from[1]], [x, to[1]], true),
-                ([x, to[1]], [left - 31., to[1]], false),
-            ],
-            "r",
-            [left - 31., to[1]],
-            Some([x, to[1]]),
-        )
+    let color = if completed { "green" } else { "gray" };
+    let symbol = |part: &str| c.symbols.get(&format!("upgrades_tree_{color}_{part}"));
+    let add = |v: &mut View, t: &Symbol, pos: [f64; 2], tag: &str| {
+        let first = v.draws.len();
+        v.add(t, pos, scale, |_| true, |_| None, Some(clip));
+        for draw in &mut v.draws[first..] {
+            draw.node.id = tag.into();
+        }
     };
-    for (a, b, vertical) in segments.drain(..) {
-        let axis = if vertical { 1 } else { 0 };
-        let lo = a[axis].min(b[axis]);
-        let hi = a[axis].max(b[axis]);
-        if hi <= lo {
-            continue;
+    let segment = |v: &mut View, a: [f64; 2], b: [f64; 2], vertical: bool| {
+        let axis = usize::from(vertical);
+        let mut low = a[axis].min(b[axis]);
+        let high = a[axis].max(b[axis]);
+        let part = if vertical { "dash_v" } else { "dash_h" };
+        let Some(t) = symbol(part) else { return };
+        let dash = t.nodes[0].rect;
+        let step = t.size[axis];
+        if step <= 0. {
+            return;
         }
-        let Some(t) = c.symbols.get(&format!(
-            "upgrades_tree_{color}_dash_{}",
-            if vertical { "v" } else { "h" }
-        )) else {
-            continue;
-        };
-        let piece = if vertical {
-            [
-                clip[0],
-                (lo * s).max(clip[1]),
-                clip[2],
-                ((hi * s).min(clip[1] + clip[3]) - (lo * s).max(clip[1])).max(0.),
-            ]
-        } else {
-            [
-                (lo * s).max(clip[0]),
-                clip[1],
-                ((hi * s).min(clip[0] + clip[2]) - (lo * s).max(clip[0])).max(0.),
-                clip[3],
-            ]
-        };
-        for j in 0..((hi - lo) / 29.).ceil() as usize {
-            let p = if vertical {
-                [a[0], lo + j as f64 * 29.]
+        let visible_start = clip[axis] / scale;
+        let visible_end = (clip[axis] + clip[axis + 2]) / scale;
+        low += ((visible_start - low) / step).floor().max(0.) * step;
+        while low < high.min(visible_end) {
+            let length = dash[axis + 2].min(high - low);
+            let mut point = a;
+            point[axis] = low - dash[axis];
+            let first = v.draws.len();
+            add(v, t, point, "academy_connector_dash");
+            for d in &mut v.draws[first..] {
+                let mut clipped = clip;
+                let lo = (low * scale).max(clip[axis]);
+                let hi = ((low + length) * scale).min(clip[axis] + clip[axis + 2]);
+                clipped[axis] = lo;
+                clipped[axis + 2] = (hi - lo).max(0.);
+                d.clip = Some(clipped);
+            }
+            low += step;
+        }
+    };
+    let gap = 6.;
+    let (direction, anchor, corner) = match target {
+        ConnectorEnd::Vertical([vertical_x, to_y]) => {
+            let down = to_y > from_y;
+            let point = [vertical_x, to_y + if down { -gap } else { gap }];
+            let corner = [vertical_x, from_y];
+            let shaft = [vertical_x, point[1] + if down { -21. } else { 21. }];
+            segment(v, [start, from_y], corner, false);
+            segment(v, corner, shaft, true);
+            (if down { "d" } else { "u" }, point, Some(corner))
+        }
+        ConnectorEnd::Branch([end, to_y]) => {
+            let point = [end - gap, to_y];
+            let corner = [start, to_y];
+            segment(v, [start, from_y], corner, true);
+            segment(v, corner, [point[0] - 21., to_y], false);
+            ("r", point, Some(corner))
+        }
+        ConnectorEnd::Side([end, to_y]) => {
+            let point = [end - gap, to_y];
+            let shaft = [point[0] - 21., to_y];
+            if (from_y - to_y).abs() < 0.01 {
+                segment(v, [start, from_y], shaft, false);
+                ("r", point, None)
             } else {
-                [lo + j as f64 * 29., a[1]]
-            };
-            v.add(t, p, s, |_| true, |_| None, Some(piece));
-        }
-    }
-    if let Some(t) = c
-        .symbols
-        .get(&format!("upgrades_tree_{color}_arrow_{arrow}"))
-    {
-        let start = v.draws.len();
-        v.add(
-            t,
-            arrow_at.map(f64::round),
-            s,
-            |_| true,
-            |_| None,
-            Some(clip),
-        );
-        for d in &mut v.draws[start..] {
-            d.node.id = format!("source_upgrade_path_arrow_{arrow}");
-        }
-    }
-    if let Some(p) = corner {
-        if let Some(t) = c.symbols.get(&format!("upgrades_tree_{color}_circle")) {
-            let start = v.draws.len();
-            v.add(t, p.map(f64::round), s, |_| true, |_| None, Some(clip));
-            for d in &mut v.draws[start..] {
-                d.node.id = "source_upgrade_path_junction".into();
+                let turn_radius = symbol("circle").map_or(0., |t| t.size[0] / 2.);
+                let elbow =
+                    ((start + shaft[0]) / 2.).max((start + turn_radius).min((start + end) / 2.));
+                let corner = [elbow, from_y];
+                segment(v, [start, from_y], corner, false);
+                segment(v, corner, [elbow, to_y], true);
+                if elbow < shaft[0] {
+                    segment(v, [elbow, to_y], shaft, false);
+                }
+                ("r", point, Some(corner))
             }
         }
+    };
+    if let Some(turn) = corner
+        && let Some(t) = symbol("circle")
+    {
+        add(v, t, turn, "academy_connector_turn");
+    }
+    if let Some(t) = symbol(&format!("arrow_{direction}")) {
+        let [x, y, w, h] = t.nodes[0].rect;
+        let offset = match direction {
+            "d" => [x + w / 2., y + h],
+            "u" => [x + w / 2., y],
+            _ => [x + w, y + h / 2.],
+        };
+        add(
+            v,
+            t,
+            [anchor[0] - offset[0], anchor[1] - offset[1]],
+            "academy_connector_arrow",
+        );
     }
 }
 
@@ -275,19 +272,31 @@ pub fn description(scene: &Scene, u: &Upgrade) -> String {
             }
         }
         if m.kind == "recipe" {
-            if let Some(n) = m.values.get("time").and_then(|v| v.as_i64()) {
-                rows.push(format!(
-                    "{}{} {}",
-                    if n < 0 { "−" } else { "+" },
-                    crate::interface_resources::duration(scene, n.abs()),
-                    interface::lang(scene, "#production", "")
-                ));
-            }
             if let Some(n) = m.values.get("incoming").and_then(|v| v.as_f64()) {
                 rows.push(format!(
                     "{} {}%",
-                    interface::lang(scene, "#reduce_cost", ""),
-                    (n * 100.).abs() as i64
+                    interface::lang(scene, "#reduce_cost", "Reduces costs"),
+                    (n * 100.).abs().round() as i64
+                ));
+            }
+            if let Some(n) = m.values.get("time").and_then(|v| v.as_i64()) {
+                let seconds = n.abs();
+                let (key, fallback, count) = if seconds < 60 {
+                    ("#SECONDS", "[1] sec.", seconds)
+                } else if seconds < 3600 {
+                    ("#MINUTES", "[1] min.", seconds / 60)
+                } else {
+                    ("#HOURS", "[1] h", seconds / 3600)
+                };
+                rows.push(format!(
+                    "{}: {}{}",
+                    interface::lang(scene, "#production", "Production"),
+                    if n < 0 { "−" } else { "+" },
+                    crate::interface_resources::number_text(
+                        interface::lang(scene, key, fallback),
+                        count
+                    )
+                    .replace(' ', "\u{a0}")
                 ));
             }
         }
@@ -628,19 +637,24 @@ pub fn build(
     let offset = scroll / s;
     for (i, id) in up.unit_order.iter().enumerate() {
         let enabled = researched(scene, state, *id);
-        let mut t = named(t, &format!("upgrades_unit_{id}"));
+        let t = named(t, &format!("upgrades_unit_{id}"));
         let co = [
             o[0] + 15. + 10. + 62.5 + i as f64 * width - offset,
             o[1] + 65. + 0.5,
         ];
-        let nodes: Vec<_> = up.items.values().filter(|u| u.affects(*id)).collect();
-        let percent =
-            nodes.iter().filter(|u| state.upgrade_ready(u.id)).count() * 100 / nodes.len().max(1);
-        for n in &mut t.nodes {
-            if n.parents.iter().any(|p| p == "progressbar") {
-                n.rect[2] = 93. * percent as f64 / 100.;
-            }
-        }
+        let (completed, total) = up.items.values().filter(|u| u.affects(*id)).fold(
+            (0_usize, 0_usize),
+            |(completed, total), u| {
+                (
+                    completed + usize::from(state.upgrade_ready(u.id)),
+                    total + 1,
+                )
+            },
+        );
+        let total = total.max(1);
+        let fraction = completed as f64 / total as f64;
+        let percent = completed * 100 / total;
+        let first = v.draws.len();
         v.add(
             &t,
             co,
@@ -710,6 +724,11 @@ pub fn build(
             },
             Some(clip),
         );
+        for draw in &mut v.draws[first..] {
+            if draw.node.id == "progressbar" {
+                draw.progress = fraction;
+            }
+        }
         if let Some(texture) = state.unit_thumbnail(scene, *id) {
             picture(
                 v,
@@ -745,6 +764,20 @@ pub fn build(
     v.hits.retain(|h| h.rect[2] > 0.);
     true
 }
+/// Optional presentation order for the fork columns that use specific rows.
+/// The list is top to bottom, and zero leaves a row vacant.
+fn branch_rows(unit: u32, layer: &[u32]) -> Option<[u32; 3]> {
+    Some(match (unit, layer) {
+        (2005, [11112, 11113]) => [11113, 11112, 0],
+        (2005, [11114, 11115]) => [11115, 11114, 0],
+        (2009, [11126, 11127, 11128]) => [11127, 11126, 11128],
+        (2009, [11129, 11135]) => [11135, 11129, 0],
+        (2011, [11055, 11183, 11184]) => [11183, 11184, 11055],
+        (2011, [11185, 11186]) => [11186, 0, 11185],
+        _ => return None,
+    })
+}
+
 fn tree(
     v: &mut View,
     scene: &Scene,
@@ -777,81 +810,135 @@ fn tree(
         |_| None,
         None,
     );
-    v.scroll_max = ((layers.len() as f64 * 264. + 10.) * s - camera.width as f64).max(0.);
     let offset = scroll / s;
     let clip = [0., 0., camera.width as f64, camera.height as f64];
-    let mut positions: BTreeMap<u32, [f64; 2]> = BTreeMap::new();
-    for (col, layer) in layers.iter().enumerate() {
-        for (row, id) in layer.iter().enumerate() {
-            let u = &up.items[id];
-            // Original single-node convergence columns are vertically centered,
-            // including the extended model cells. The three-row bottom margin
-            // does not apply to these columns (paired original ARM reference).
-            let mut cy = if layer.len() == 1 {
-                height * 0.5
+    let card_bounds = |id| {
+        c.symbols[if up.items[&id].model(unit).is_some() {
+            "upgrades_tree_upgrade_cell_locked_extended"
+        } else {
+            "upgrades_tree_upgrade_cell_locked"
+        }]
+        .nodes[0]
+            .rect
+    };
+    let mut cards: BTreeMap<u32, [f64; 4]> = BTreeMap::new();
+    let mut layers = layers;
+    for (column, layer) in layers.iter_mut().enumerate() {
+        let fixed_rows = branch_rows(unit, layer);
+        // Keep connected branches in their vertical order. The sort is stable
+        // so siblings with the same parent keep their catalog order.
+        let parent_center = |id| {
+            let mut count = 0;
+            let sum = up.items[&id]
+                .parents
+                .iter()
+                .filter_map(|parent| cards.get(parent))
+                .map(|r| {
+                    count += 1;
+                    r[1] + r[3] / 2.
+                })
+                .sum::<f64>();
+            if count == 0 {
+                height / 2.
             } else {
-                height * 1.33 / (layer.len() + 1) as f64 * (row + 1) as f64 - 53.
-            };
-            if let Some(parent) = u.parents.first().and_then(|p| positions.get(p)) {
-                if u.parents.len() == 1 || layer.len() == 2 {
-                    cy = parent[1];
+                sum / count as f64
+            }
+        };
+        layer.sort_by(|a, b| parent_center(*a).total_cmp(&parent_center(*b)));
+        let rows = layer.len();
+        // Two parallel branches can occupy any two of the three established
+        // rows. Prefer continuing the parents' rows over recentering the pair.
+        let pair = (rows == 2 && fixed_rows.is_none()).then(|| {
+            let spacing = height / 3.;
+            let a = parent_center(layer[0]) / spacing - 0.5;
+            let b = parent_center(layer[1]) / spacing - 0.5;
+            let mut best = [0., 1.];
+            let score = |[top, bottom]: [f64; 2]| (top - a).abs() + (bottom - b).abs();
+            for option in [[0., 2.], [1., 2.]] {
+                if score(option) + 0.001 < score(best) {
+                    best = option;
                 }
             }
-            if col > 0 && layers[col - 1].len() == 1 && layer.len() > 1 {
-                cy = height / 3. * (row + 1) as f64 - 53.;
-            }
-            positions.insert(*id, [120. + 264. * col as f64 - offset, cy]);
+            best
+        });
+        for (row, id) in layer.iter().enumerate() {
+            let [_, _, width, card_height] = card_bounds(*id);
+            let cx = 140. + 264. * column as f64 - offset;
+            let fixed_lane = fixed_rows.and_then(|rows| rows.iter().position(|v| v == id));
+            let cy = if let Some(lane) = fixed_lane {
+                (lane as f64 + 0.5) * height / 3.
+            } else if let Some(pair) = pair {
+                (pair[row] + 0.5) * height / 3.
+            } else {
+                height / 2. + (row as f64 - (rows as f64 - 1.) / 2.) * height / rows.max(3) as f64
+            };
+            cards.insert(
+                *id,
+                [cx - width / 2., cy - card_height / 2., width, card_height],
+            );
         }
     }
-    // Original texture segments, drawn behind cells. Position follows the DAG;
-    // uncommon source path option variants still require paired visual review.
-    for layer in &layers {
-        for id in layer {
-            let u = &up.items[id];
-            let target = positions[id];
-            for p in &u.parents {
-                if let Some(parent) = positions.get(p) {
-                    let color = if state.upgrade_ready(*p) {
-                        "green"
-                    } else {
-                        "gray"
-                    };
-                    let parent_upgrade = &up.items[p];
-                    let parent_size = c.symbols[if parent_upgrade.model(unit).is_some() {
-                        "upgrades_tree_upgrade_cell_locked_extended"
-                    } else {
-                        "upgrades_tree_upgrade_cell_locked"
-                    }]
-                    .size;
-                    let target_size = c.symbols[if u.model(unit).is_some() {
-                        "upgrades_tree_upgrade_cell_locked_extended"
-                    } else {
-                        "upgrades_tree_upgrade_cell_locked"
-                    }]
-                    .size;
-                    let col = layers
-                        .iter()
-                        .position(|layer| layer.contains(id))
-                        .unwrap_or(0);
-                    // Source option selects which side owns the elbow. A
-                    // convergence approaches the destination vertically; a
-                    // split turns beside the preceding card.
-                    let option = u.parents.len() > 1
-                        || col > 0 && layers[col].len() <= layers[col - 1].len();
-                    draw_path(
-                        v,
-                        c,
-                        color,
-                        *parent,
-                        target,
-                        parent_size,
-                        target_size,
-                        option,
-                        s,
-                        clip,
-                    );
+    let right = cards
+        .values()
+        .map(|r| r[0] + r[2] + offset)
+        .fold(0., f64::max);
+    v.scroll_max = ((right + 14.) * s - camera.width as f64).max(0.);
+
+    for (layer, id) in layers
+        .iter()
+        .flat_map(|layer| layer.iter().map(move |id| (layer, id)))
+    {
+        let [x, y, w, h] = cards[id];
+        let center = y + h / 2.;
+        let vertical_port = |from_y: f64| {
+            let edge = if from_y < y - 38. {
+                y
+            } else if from_y > y + h + 38. {
+                y + h
+            } else {
+                return None;
+            };
+            // A vertical approach may only cross empty space in this column.
+            let clear = layer.iter().filter(|other| *other != id).all(|other| {
+                let r = cards[other];
+                r[1] >= edge.max(from_y) || r[1] + r[3] <= edge.min(from_y)
+            });
+            clear.then_some([x + w * 0.23, edge])
+        };
+        let mut parents: Vec<_> = up.items[id]
+            .parents
+            .iter()
+            .filter_map(|parent| Some((*parent, *cards.get(parent)?)))
+            .collect();
+        parents.sort_by(|(_, a), (_, b)| (a[1] + a[3] / 2.).total_cmp(&(b[1] + b[3] / 2.)));
+        let side = parents
+            .iter()
+            .map(|(_, r)| r[1] + r[3] / 2.)
+            .filter(|from_y| vertical_port(*from_y).is_none())
+            .collect::<Vec<_>>();
+        let middle = side
+            .iter()
+            .position(|y| (*y - center).abs() < 0.01)
+            .map_or((side.len() as f64 - 1.) / 2., |index| index as f64);
+        let mut row = 0;
+        for (parent, [px, py, pw, ph]) in parents {
+            // Give each prerequisite its own endpoint and completion color.
+            let mut from = [px + pw, py + ph / 2.];
+            let to = if let Some(port) = vertical_port(from[1]) {
+                ConnectorEnd::Vertical(port)
+            } else {
+                let to_y = center + (row as f64 - middle) * 21.;
+                row += 1;
+                if up.items[&parent].model(unit).is_some()
+                    && (to_y < py - 24. || to_y > py + ph + 24.)
+                {
+                    from = [px + pw * 0.77, if to_y < py { py } else { py + ph }];
+                    ConnectorEnd::Branch([x, to_y])
+                } else {
+                    ConnectorEnd::Side([x, to_y])
                 }
-            }
+            };
+            draw_path(v, c, state.upgrade_ready(parent), from, to, s, clip);
         }
     }
     for layer in &layers {
@@ -872,14 +959,19 @@ fn tree(
                 if ext { "_extended" } else { "" }
             );
             let mut t = named(&c.symbols[&key], &format!("upgrade_cell_{id}"));
-            let center = positions[id];
-            let o = [
-                (center[0] - t.size[0] * 0.5).round(),
-                (center[1] - t.size[1] * 0.5).round(),
-            ];
+            let [x, y, _, _] = cards[id];
+            let [local_x, local_y, card_width, _] = card_bounds(*id);
+            let o = [x - local_x, y - local_y];
             for n in &mut t.nodes {
                 if n.id == "upgrade_icon" {
                     n.texture.clear();
+                }
+                if n.id == "upgrade_modifires_txt" {
+                    // Extended cards have a model preview after the text.
+                    // Keep the label and its wrapped lines inside the panel.
+                    let right = if ext { 174. } else { local_x + card_width - 7. };
+                    n.rect[2] = n.rect[2].min(right - n.rect[0]);
+                    n.multiline = true;
                 }
             }
             v.add(

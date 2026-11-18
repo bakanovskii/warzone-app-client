@@ -391,16 +391,6 @@ pub fn workshop(
                 }
             }
         }
-        if laboratory {
-            for d in &mut v.draws[begin..] {
-                if d.node.id == "caption_txt"
-                    && crate::interface_text::candara_height(&d.node, &d.node.text)
-                        <= d.node.line_height * 1.5
-                {
-                    d.node.rect[1] += 5. * s;
-                }
-            }
-        }
         if busy && !active {
             for d in &mut v.draws[begin..] {
                 if d.node

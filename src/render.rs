@@ -2859,10 +2859,14 @@ impl<'a> Art<'a> {
             // flushes for every source label, including offscreen map markers.
             source_clip(canvas, Some(text_clip))?;
             // ShopDialog.showSelection moves one-line captions by+5 phone
-            // points, and two-line troop captions by-2. Verified Thumb slice
-            // 0xdd13a/0xdd914/0xdd944; do not alter other retained text fields.
+            // points, and two-line troop captions by-2.
             let shop_caption =
                 n.id == "caption_txt" && n.parents.iter().any(|p| p.starts_with("shop_item_"));
+            // Use the rendered line count for the laboratory's title inset.
+            let lab_caption = n.id == "caption_txt"
+                && n.parents
+                    .iter()
+                    .any(|p| p.starts_with("source_lab_recipe_"));
             let shop_unit = shop_caption
                 && n.parents.iter().any(|p| {
                     p.strip_prefix("shop_item_")
@@ -2879,7 +2883,7 @@ impl<'a> Art<'a> {
                 // MissionGoalsDialog centers MTLabel._textHeight inside its
                 // saved hintFrame after calcSize, without changing line height.
                 ((h - lines.len() as f64 * n.line_height) * 0.5).round()
-            } else if shop_caption && lines.len() == 1 {
+            } else if (shop_caption || lab_caption) && lines.len() == 1 {
                 5. * n.font_size / 14.
             } else if shop_unit && lines.len() == 2 {
                 -2. * n.font_size / 14.
@@ -2901,8 +2905,6 @@ impl<'a> Art<'a> {
                 let t = self.text.get_mut(&key).unwrap();
                 t.set_alpha_mod(draw.opacity);
                 let q = t.query();
-                let fit = 1.;
-                let tw = q.width as f64 * fit;
                 let advance = source_advance(
                     &self.fonts[face],
                     line,
@@ -2927,19 +2929,14 @@ impl<'a> Art<'a> {
                 // MTLabel draws its baseline at1+UIFont.ascender. The raster
                 // reserves effect padding around that glyph, not inside its frame.
                 let yy = yy + 1. - pad;
+                // Copy the raster 1:1 on whole output pixels. SDL's inverted
+                // OpenGL render target can sample different glyph rows at a
+                // half-pixel origin than the direct draw during scrolling.
+                let target = Rect::new(xx.round() as i32, yy.round() as i32, q.width, q.height);
                 if self.trace_source_buttons && n.id == "button_txt" {
-                    self.source_button_trace.push(serde_json::json!({"parents":n.parents,"text":line,"target":[xx,yy,tw,q.height as f64*fit],"clip":[text_clip.x(),text_clip.y(),text_clip.width(),text_clip.height()],"raster":[q.width,q.height],"color":n.color}));
+                    self.source_button_trace.push(serde_json::json!({"parents":n.parents,"text":line,"target":[target.x(),target.y(),target.width() as i32,target.height() as i32],"clip":[text_clip.x(),text_clip.y(),text_clip.width(),text_clip.height()],"raster":[q.width,q.height],"color":n.color}));
                 }
-                canvas.copy_f(
-                    t,
-                    None,
-                    Some(FRect::new(
-                        xx as f32,
-                        yy as f32,
-                        tw as f32,
-                        (q.height as f64 * fit) as f32,
-                    )),
-                )?;
+                canvas.copy(t, None, Some(target))?;
                 t.set_alpha_mod(255);
             }
         }

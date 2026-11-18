@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.2 (Unreleased)
+
+### Bugfixes
+
+- Fill the academy progress bar to the end at 100%.
+- Center milestone upgrade cards and align dashed dependency arrows and round turn markers.
+- Keep academy branches aligned across columns and show cost reductions before training time changes.
+- Keep long training effects within their cards and correct the branch order for scouts, Hyena and ST-105.
+- Align single-line material names on laboratory cards.
+- Keep text crisp when scrollable panels switch between stationary and moving.
+
 ## 0.2.1 (18 Nov 2026)
 
 ### Bugfixes

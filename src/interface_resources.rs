@@ -19,7 +19,10 @@ pub fn number_text(text: &str, n: i64) -> String {
             return out;
         };
         let forms: Vec<_> = tail[..end].split('|').collect();
-        if forms.len() >= 3 {
+        if forms.len() == 2 {
+            let index = usize::from(n.unsigned_abs() != 1);
+            out.push_str(&forms[index].replace('#', &n.to_string()));
+        } else if forms.len() >= 3 {
             let n = n.unsigned_abs();
             let index = if (11..=14).contains(&(n % 100)) {
                 2
