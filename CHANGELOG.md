@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.2 (Unreleased)
+## 0.2.2 (19 Nov 2026)
 
 ### Bugfixes
 
@@ -10,6 +10,7 @@
 - Keep long training effects within their cards and correct the branch order for scouts, Hyena and ST-105.
 - Align single-line material names on laboratory cards.
 - Keep text crisp when scrollable panels switch between stationary and moving.
+- Start the web client on browsers that disallow synchronous WebAssembly instantiation.
 
 ## 0.2.1 (18 Nov 2026)
 

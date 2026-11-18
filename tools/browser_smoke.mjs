@@ -148,6 +148,25 @@ try {
   await rpc("Page.enable");
   await rpc("Runtime.enable");
   await rpc("Network.enable");
+  // Reproduce the legacy Chromium limit while exercising the real WASM startup.
+  await rpc("Page.addScriptToEvaluateOnNewDocument", {
+    source: `(() => {
+      const sizes = new WeakMap();
+      const compile = WebAssembly.compile;
+      WebAssembly.compile = async (bytes) => {
+        const module = await compile(bytes);
+        sizes.set(module, bytes.byteLength);
+        return module;
+      };
+      WebAssembly.Instance = new Proxy(WebAssembly.Instance, {
+        construct(ctor, args, newTarget) {
+          if (sizes.get(args[0]) > 4096)
+            throw new RangeError("Synchronous WASM instantiation exceeds the legacy Chromium limit");
+          return Reflect.construct(ctor, args, newTarget);
+        },
+      });
+    })()`,
+  });
   const wide = process.env.WARZONE_WIDE === "1";
   const phoneMode = process.env.WARZONE_PHONE === "1";
   if (phoneMode) {

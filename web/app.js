@@ -194,13 +194,15 @@ async function launch() {
     const [width, height] = size();
     canvas.width = width;
     canvas.height = height;
-    game = await createWarzone({
+    const runtime = createWarzone({
       canvas,
       noInitialRun: true,
       instantiateWasm: (imports, receive) => {
-        const instance = new WebAssembly.Instance(wasmModule, imports);
-        receive(instance, wasmModule);
-        return instance.exports;
+        // Older Chromium limits the synchronous constructor on the main thread.
+        WebAssembly.instantiate(wasmModule, imports)
+          .then((instance) => receive(instance, wasmModule))
+          .catch(stopRuntime);
+        return {};
       },
       getPreloadedPackage: () => packageData.buffer,
       locateFile: asset,
@@ -222,6 +224,8 @@ async function launch() {
       },
       onAbort: (error) => stopRuntime(Error(String(error))),
     });
+    // A rejected instantiation never calls receive, so the factory could keep waiting.
+    game = await Promise.race([runtime, stopped]);
     // Runtime initialization must finish before accessing the filesystem. A
     // failed read rejects launch and releases its lock; no run dependency hangs.
     game.FS.mkdirTree("/saves");
